@@ -78,5 +78,8 @@ ln -s "$pkg/node_modules/@earendil-works/pi-tui" "$tmp/node_modules/@earendil-wo
 ln -s "$pkg/node_modules/jiti" "$tmp/node_modules/jiti"
 cp -r "$modules" "$tmp/modules"
 
+echo "---- 静态检查（用了别的模块的导出却没 import）"
+node "$modules/tests/static-check.mjs"
+
 echo "pi 包目录: $pkg"
 node --test "$tmp/modules/tests/"

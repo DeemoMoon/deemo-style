@@ -635,7 +635,7 @@ export function shortenTail(text: string, maxWidth: number): string {
 	if (visibleWidth(text) <= maxWidth) return text;
 
 	// ASCII 快路径：宽度 = 字符数，直接切片，省掉逐字符 visibleWidth 调用
-	// （displayPath / ShortenTail 在启动页与状态栏会走）。
+	// （shortenTail / formatCwd 在启动页与状态栏会走）。
 	if (ASCII_ONLY.test(text)) return `…${text.slice(Math.max(0, text.length - (maxWidth - 1)))}`;
 
 	const chars = Array.from(text);

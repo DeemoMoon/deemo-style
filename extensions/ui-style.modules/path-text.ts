@@ -9,27 +9,20 @@ import { homedir } from "node:os";
 
 /**
  * home 目录：只解析一次。Windows 上 Node 的 homedir() 每次调用都要读环境变量，
- * 而 displayPath() 在每个工具面板的**每一帧**都会用到它。
+ * 而路径缩写会在每个工具面板的**每一帧**被用到。
  */
 export const HOME = homedir();
 
 /**
  * 把 home 目录缩写成 `~`（大小写不敏感，Windows 友好）。
  * rest 必须为空或以路径分隔符开头：home 为 `C:\Users\x` 时不能把
- * `C:\Users\x2` 误缩成 `~/2`（displayPath / formatCwd / 启动页共用）。
+ * `C:\Users\x2` 误缩成 `~/2`（formatCwd / 启动页共用）。
  */
 export function shortenHome(path: string): string {
 	if (!HOME) return path;
 	if (!path.toLowerCase().startsWith(HOME.toLowerCase())) return path;
 	const rest = path.slice(HOME.length);
 	return rest === "" || rest.startsWith("/") || rest.startsWith("\\") ? `~${rest}` : path;
-}
-
-/** 把 home 目录缩写成 `~`，只取第一行。 */
-export function displayPath(path: unknown, fallback = "..."): string {
-	const cleaned = str(path).replace(/\r\n?/g, "\n").split("\n")[0]?.trim() ?? "";
-	if (!cleaned) return fallback;
-	return shortenHome(cleaned);
 }
 
 /** 把 home 目录缩写成 `~`，并统一成 `/`，让路径短一些（状态栏/信息面板共用）。 */

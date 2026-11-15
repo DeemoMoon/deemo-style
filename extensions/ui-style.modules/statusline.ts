@@ -37,13 +37,8 @@ import {
 	shortenPathLine,
 } from "./core.ts";
 import { computeSessionStats, emptyStats, type SessionStats, type StatEntryLike } from "./session-stats.ts";
-import {
-	LEVEL_MUTED,
-	levelOf,
-	renderContextBar,
-	// 命中率"越高越好"，用专门的档位函数（别用 levelOf）
-	hitRateMuted,
-} from "./context-bar.ts";
+// 注意：缓存命中率是"越高越好"，用 hitRateMuted（levelOf 是"越高越糟"，别混）
+import { LEVEL_MUTED, hitRateMuted, levelOf, renderContextBar } from "./context-bar.ts";
 import { thinkingText as sharedThinkingText } from "./levels.ts";
 import type {
 	ContextUsageLike,
