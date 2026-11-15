@@ -25,6 +25,10 @@ pi install ./deemo-style
 
 装完在 pi 里执行 `/reload`（或重启）。
 
+> 注意：`pi install` 认 **git / npm / 目录** 三种来源；`.tgz` / `.zip` 这类压缩包不算包来源
+> （会被当成"单个扩展文件"处理）。想发压缩包的话，让对方解压后把 `ui-style.ts` 和
+> `ui-style.modules/` 一起放进 `~/.pi/agent/extensions/` 即可。
+
 ⚠️ **不要和手工复制的副本同时存在**。如果你之前把 `ui-style.ts` 直接放进 `~/.pi/agent/extensions/`，请先删掉
 （`~/.pi/agent/extensions/ui-style.ts` 和 `ui-style.modules/`），否则两个实例会互相摘补丁。
 
@@ -86,6 +90,23 @@ export const FEATURES = {
   此时更新本扩展即可。
 - 信息面板的模型/思考改动**不会持久化**（pi 的扩展 API 没有 `persist`）。
 - 鼠标在 tmux / zellij 下不上报"纯移动"，但点击和滚轮正常。
+
+## 发布（给自己看）
+
+```bash
+cd deemo-style
+git remote add origin git@github.com:<你的账号>/deemo-style.git
+git push -u origin main
+git tag v1.0.0 && git push origin v1.0.0     # 之后可用 git:...@v1.0.0 固定版本
+```
+
+改完代码后：
+
+```bash
+bash scripts/smoke.sh          # 测试 + 干净环境安装 + 真实加载
+# 更新 package.json 的 version 与 CHANGELOG.md（pi 会在更新后自动展示变更）
+git commit -am "feat: ..." && git push
+```
 
 ## 目录结构
 

@@ -1615,3 +1615,8 @@ test("#7 原型补丁：unpatch 有所有权校验（别人改过就不动），
 	// 重新打补丁，避免影响后续用例
 	patchAssistantMessageStyle();
 });
+
+test("对外只注册 alt+i 快捷键，不注册任何 /命令", () => {
+	assert.ok(shortcuts.get("alt+i"), "应注册 alt+i");
+	assert.equal(commands.size, 0, `不应注册命令：${[...commands.keys()].join(",")}`);
+});
