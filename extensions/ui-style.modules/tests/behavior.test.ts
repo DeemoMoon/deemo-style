@@ -1620,3 +1620,67 @@ test("对外只注册 alt+i 快捷键，不注册任何 /命令", () => {
 	assert.ok(shortcuts.get("alt+i"), "应注册 alt+i");
 	assert.equal(commands.size, 0, `不应注册命令：${[...commands.keys()].join(",")}`);
 });
+
+test("状态栏缓存命中率：有缓存数据时必须渲染成功，且越高越绿（回归：hitRateMuted 漏导入）", async () => {
+	const usage = { input: 1000, output: 500, cacheRead: 9000, cacheWrite: 0, cost: { total: 0.1 } };
+	const tui = { requestRender() {}, terminal: { rows: 40 } };
+	const footerData = {
+		getGitBranch: () => "main",
+		getExtensionStatuses: () => new Map(),
+		getAvailableProviderCount: () => 1,
+		onBranchChange: () => () => {},
+	};
+	const sessionManager = {
+		getCwd: () => "/tmp",
+		getSessionId: () => "session-cache",
+		getSessionName: () => "缓存用例",
+		getLeafId: () => "leaf-cache",
+		getBranch: () => [
+			{ type: "message", timestamp: "2026-01-01T00:00:00.000Z", message: { role: "user" } },
+			{ type: "message", timestamp: "2026-01-01T00:00:30.000Z", message: { role: "assistant", usage } },
+		],
+		getEntries: () => [],
+		getLeafEntry: () => undefined,
+		getEntry: () => undefined,
+		getLabel: () => undefined,
+		getHeader: () => null,
+		getTree: () => [],
+		buildContextEntries: () => [],
+		buildSessionProjection: () => ({}),
+	};
+	let footer;
+	const ctx = {
+		mode: "tui",
+		cwd: "/tmp",
+		model: { id: "demo", provider: "p", contextWindow: 200000 },
+		sessionManager,
+		getContextUsage: () => ({ tokens: 1000, contextWindow: 200000, percent: 0.5 }),
+		ui: {
+			theme,
+			setFooter(factory) {
+				footer = factory(tui, theme, footerData);
+			},
+			setHeader() {},
+			setEditorComponent() {},
+			setWidget() {},
+			setWorkingIndicator() {},
+			setWorkingMessage() {},
+			setStatus() {},
+		},
+	};
+	// 9000 / (1000 + 9000) = 90% 命中
+	for (const handler of handlers.get("session_start") ?? []) {
+		await handler({ type: "session_start" }, ctx);
+	}
+
+	assert.ok(footer, "footer 没挂上");
+	let lines;
+	assert.doesNotThrow(() => {
+		lines = footer.render(120);
+	}, "有缓存数据时渲染不能崩（hitRateMuted 必须已导入）");
+	const text = strip(lines.join("\n"));
+	assert.match(text, /Cache\s+90\.0%/, `应显示 90.0%：\n${text}`);
+	// 降饱和绿色 rgb(126;180;120)；红色是 228;122;110
+	assert.ok(lines.join("").includes("38;2;126;180;120"), "90% 命中应着绿色");
+	assert.ok(!lines.join("").includes("38;2;228;122;110"), "不该出现红色");
+});

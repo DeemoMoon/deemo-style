@@ -41,6 +41,8 @@ import {
 	LEVEL_MUTED,
 	levelOf,
 	renderContextBar,
+	// 命中率"越高越好"，用专门的档位函数（别用 levelOf）
+	hitRateMuted,
 } from "./context-bar.ts";
 import { thinkingText as sharedThinkingText } from "./levels.ts";
 import type {
