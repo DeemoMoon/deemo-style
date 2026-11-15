@@ -1,0 +1,19 @@
+{
+  "name": "deemo-style",
+  "version": "1.0.0",
+  "description": "pi 界面样式自定义：助手/用户消息、工具面板、输入框、状态栏、启动页、会话信息面板（alt+i）",
+  "keywords": ["pi-package", "pi", "tui", "theme", "ui"],
+  "license": "MIT",
+  "author": "deemo",
+  "pi": {
+    "extensions": ["./extensions/ui-style.ts"],
+    "changelogPath": "./CHANGELOG.md"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "files": ["extensions", "docs", "README.md", "CHANGELOG.md", "LICENSE"]
+}
