@@ -2,6 +2,8 @@
 
 给 [pi](https://pi.dev) 用的一套界面样式扩展：重做助手/用户消息、工具面板、输入框、状态栏、启动页，另加一个会话信息面板（`alt+i`）。
 
+仓库：<https://github.com/DeemoMoon/deemo-style>
+
 只改显示层，不动会话内容，不联网、不写配置文件。
 
 ## 要求
@@ -14,10 +16,10 @@
 
 ```bash
 # 1) 从 git 安装（推荐）
-pi install git:github.com/<你的账号>/deemo-style
+pi install git:github.com/DeemoMoon/deemo-style
 
 #    固定到某个版本
-pi install git:github.com/<你的账号>/deemo-style@v1.0.0
+pi install git:github.com/DeemoMoon/deemo-style@v1.0.0
 
 # 2) 已经 clone 到本地
 pi install /path/to/deemo-style     # 从任意目录指向包目录
@@ -32,8 +34,9 @@ pi -e /path/to/deemo-style
 几条实测过的注意点（pi **1.5.2**）：
 
 - **`-e` 只接受"文件 / 目录路径"**，`pi -e git:…`、`pi -e npm:…` 这种包来源在 1.5.2 里不生效（会被当成一个不存在的路径而**静默跳过**，不报错）。
-- **支持** `git:github.com/你/仓库`、`https://github.com/你/仓库`、`npm:包名`；
-  **不支持** scp 形式 `git@github.com:你/仓库.git`。
+- **支持** `git:github.com/DeemoMoon/deemo-style`、`https://github.com/DeemoMoon/deemo-style`、`npm:包名`；
+  **不支持** scp 形式 `git@github.com:DeemoMoon/deemo-style.git`（`parseGitUrl` 解析不出来，会被当成本地路径）。
+  也就是说：`git clone` 用 SSH 没问题，但 `pi install` 要写成 `git:github.com/DeemoMoon/deemo-style`。
 - `pi install` 认 **git / npm / 目录** 三种来源；`.tgz` / `.zip` 压缩包不算包来源，
   想发压缩包的话，让对方解压后把 `ui-style.ts` 和 `ui-style.modules/` 一起放进
   `~/.pi/agent/extensions/`。
@@ -105,9 +108,8 @@ export const FEATURES = {
 
 ```bash
 cd deemo-style
-git remote add origin git@github.com:<你的账号>/deemo-style.git
-git push -u origin main
-git tag v1.0.0 && git push origin v1.0.0     # 之后可用 git:...@v1.0.0 固定版本
+git push                                     # remote: git@github.com:DeemoMoon/deemo-style.git（默认分支 master）
+git tag v1.0.0 && git push origin v1.0.0     # 之后可用 git:…@v1.0.0 固定版本
 ```
 
 改完代码后：
