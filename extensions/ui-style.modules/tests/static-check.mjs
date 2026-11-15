@@ -14,8 +14,10 @@
 
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const dir = new URL("..", import.meta.url).pathname;
+// 用 fileURLToPath 而不是 URL.pathname：后者会把非 ASCII 目录名百分号编码
+const dir = fileURLToPath(new URL("..", import.meta.url));
 const files = readdirSync(dir).filter((name) => name.endsWith(".ts"));
 const sources = new Map(files.map((file) => [file, readFileSync(join(dir, file), "utf8")]));
 

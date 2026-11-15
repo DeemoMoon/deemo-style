@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { createJiti } from "jiti";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -17,7 +18,7 @@ const jiti = createJiti(import.meta.url, { moduleCache: false });
 const piMain = await jiti.import("@earendil-works/pi-coding-agent");
 piMain.initTheme("dark");
 
-const extension = await jiti.import(new URL("../extension.ts", import.meta.url).pathname, {
+const extension = await jiti.import(fileURLToPath(new URL("../extension.ts", import.meta.url)), {
 	default: true,
 });
 
@@ -714,7 +715,7 @@ test("信息条图标：沙漏 4 帧轮转 + 速度档字形，宽度不抖、�
 });
 
 test("速度图标：3 档字形+颜色，档内按 6s/4s/2s 平滑呼吸", async () => {
-	const infobar = await jiti.import(new URL("../infobar.ts", import.meta.url).pathname);
+	const infobar = await jiti.import(fileURLToPath(new URL("../infobar.ts", import.meta.url)));
 	const { speedFrame, speedIdleFrame, speedTier } = infobar;
 
 	// 1) 三档字形（60 / 150 是档位边界，含边界）
@@ -974,7 +975,7 @@ test("高速流式（≈200 tok/s）：末行始终完整", () => {
 });
 
 test("阅读辅助：只有「在跟随 + 回复超过视口 70%」才跳回回复开头", async () => {
-	const reading = await jiti.import(new URL("../reading.ts", import.meta.url).pathname);
+	const reading = await jiti.import(fileURLToPath(new URL("../reading.ts", import.meta.url)));
 	const { shouldJumpToReplyStart } = reading;
 
 	// 用户在翻历史 → 不打扰
