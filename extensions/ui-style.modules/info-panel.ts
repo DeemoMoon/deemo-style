@@ -59,7 +59,7 @@ import {
 	SKY_BLUE,
 	WARN_YELLOW,
 } from "./core.ts";
-import { levelRgb, renderContextBar } from "./context-bar.ts";
+import { hitRateRgb, levelRgb, renderContextBar } from "./context-bar.ts";
 import { supportedThinkingLevels, THINKING_COLORS } from "./levels.ts";
 import { computeSessionStats, type SessionStats } from "./session-stats.ts";
 
@@ -398,7 +398,7 @@ export function buildSessionInfoRows(
 	const cacheValue =
 		rate === undefined
 			? `${MUTED}--${RESET_FG}`
-			: `${fg24(levelRgb(rate), `${rate.toFixed(1)}%`)}${RESET_FG}${plain(
+			: `${fg24(hitRateRgb(rate), `${rate.toFixed(1)}%`)}${RESET_FG}${plain(
 					`  读 ${formatTokens(stats.cacheReadTokens)} · 写 ${formatTokens(stats.cacheWriteTokens)}`,
 				)}`;
 

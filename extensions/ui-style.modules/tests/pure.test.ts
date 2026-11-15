@@ -54,7 +54,14 @@ import {
 	tokenCell,
 } from "../info-panel.ts";
 import { computeSessionStats } from "../session-stats.ts";
-import { renderContextBar, levelOf } from "../context-bar.ts";
+import {
+	renderContextBar,
+	levelOf,
+	hitRateLevel,
+	hitRateRgb,
+	levelRgb,
+	LEVEL_BAR_FILL,
+} from "../context-bar.ts";
 import { supportedThinkingLevels } from "../levels.ts";
 import { stripBackgroundSgr } from "../assistant.ts";
 
@@ -673,4 +680,24 @@ test("#1 ExtensionStatusText：插入序≠字母序时第二次调用命中缓�
 	]);
 	assert.equal(cache.update(reordered), "A ZZ");
 	assert.equal(cache.updates, 3);
+});
+
+test("缓存命中率方向：越高越好（99.2% 绿、40% 红），别和上下文占用混用", () => {
+	// 缓存：越高越好
+	assert.equal(hitRateLevel(99.2), "ok");
+	assert.equal(hitRateLevel(85), "ok");
+	assert.equal(hitRateLevel(80), "warn");
+	assert.equal(hitRateLevel(50), "bad");
+	assert.equal(hitRateLevel(12), "bad");
+	assert.equal(hitRateLevel(undefined), "ok");
+
+	// 上下文占用：越高越糟（阈值相同、方向相反）
+	assert.equal(levelOf(12), "ok");
+	assert.equal(levelOf(80), "warn");
+	assert.equal(levelOf(99.2), "bad");
+
+	// 颜色映射不能混
+	assert.deepEqual(hitRateRgb(99.2), LEVEL_BAR_FILL.ok);
+	assert.deepEqual(hitRateRgb(40), LEVEL_BAR_FILL.bad);
+	assert.deepEqual(levelRgb(99.2), LEVEL_BAR_FILL.bad);
 });

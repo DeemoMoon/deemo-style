@@ -15,6 +15,7 @@ export type Level = "ok" | "warn" | "bad";
 export const LEVEL_OK_AT = 50;
 export const LEVEL_WARN_AT = 80;
 
+/** 上下文占用：越高越糟（≥81 红）。 */
 export function levelOf(percent: number | null | undefined): Level {
 	if (typeof percent !== "number" || !Number.isFinite(percent)) return "ok";
 	const clamped = Math.max(0, Math.min(100, percent));
@@ -40,9 +41,32 @@ export const LEVEL_MUTED: Record<Level, Rgb> = {
 	bad: [228, 122, 110],
 };
 
+/**
+ * 缓存命中率：**越高越好**（≤50 红、≤80 黄、其余绿）。
+ *
+ * 注意别和 `levelOf()` 混用：那个是"上下文占用率"，越高越糟。
+ * 两者阈值相同、方向相反，写反了就会出现"99.2% 缓存命中显示成红色"。
+ */
+export function hitRateLevel(rate: number | null | undefined): Level {
+	if (typeof rate !== "number" || !Number.isFinite(rate)) return "ok";
+	if (rate <= LEVEL_OK_AT) return "bad";
+	if (rate <= LEVEL_WARN_AT) return "warn";
+	return "ok";
+}
+
 /** 档位 → 色条填充色（按百分比取档位）。 */
 export function levelRgb(percent: number | null | undefined): Rgb {
 	return LEVEL_BAR_FILL[levelOf(percent)];
+}
+
+/** 缓存命中率 → 颜色（数字与色条用同一套）。 */
+export function hitRateRgb(rate: number | null | undefined): Rgb {
+	return LEVEL_BAR_FILL[hitRateLevel(rate)];
+}
+
+/** 缓存命中率 → 降饱和数字色。 */
+export function hitRateMuted(rate: number | null | undefined): Rgb {
+	return LEVEL_MUTED[hitRateLevel(rate)];
 }
 
 /** 色条字形：状态栏用 ▣□（细），信息面板用 █░（粗）。 */

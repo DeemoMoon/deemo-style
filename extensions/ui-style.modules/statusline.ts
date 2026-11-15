@@ -257,7 +257,8 @@ class StatusLineFooter implements Component {
 		const cache =
 			rate === undefined || rate === null
 				? text("Cache --")
-				: text("Cache ") + fg24(LEVEL_MUTED[levelOf(rate)], `${rate.toFixed(1)}%`);
+				// 命中率越高越好 → 用 hitRateMuted（别用 levelOf，那是"越高越糟"）
+				: text("Cache ") + fg24(hitRateMuted(rate), `${rate.toFixed(1)}%`);
 
 		const cost = text(`Cost ￥${(this.stats.cost * USD_TO_CNY).toFixed(2)}`);
 
