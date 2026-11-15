@@ -18,8 +18,8 @@
 # 1) 从 git 安装（推荐）
 pi install git:github.com/DeemoMoon/deemo-style
 
-#    固定到某个版本
-pi install git:github.com/DeemoMoon/deemo-style@v1.0.0
+#    固定到某个版本（tag 仍然可用）
+pi install git:github.com/DeemoMoon/deemo-style@v1.1.0
 
 # 2) 已经 clone 到本地
 pi install /path/to/deemo-style     # 从任意目录指向包目录
@@ -31,19 +31,48 @@ pi -e /path/to/deemo-style
 
 装完在 pi 里执行 `/reload`（或重启）。
 
+### 本仓库没有 `package.json`（有意为之）
+
+pi 安装 **git 来源**时的流程是：`git clone` → **如果目录里有 `package.json`** → 跑包管理器安装依赖
+（npm / pnpm / bun）。本扩展没有任何运行时依赖，却会因为存在 `package.json` 而被要求先装好 npm；
+在没装 Node.js 的 Windows 机器上就会直接失败：
+
+```
+'npm' is not recognized as an internal or external command
+Error: spawn npm ENOENT
+```
+
+所以这里**故意不放 `package.json`**：pi 按约定目录 `extensions/*.ts` 发现扩展，`git clone` 之后不会触发
+npm，只需要 `git` 就能安装。代价是没有 `version` 字段（升级时不弹 changelog，看本文件即可）、
+也不在 pi.dev 画廊里。
+
+> 如果你以后加回了 `package.json`，请想清楚：Windows 用户会需要先安装 Node.js 才能用 `pi install git:`。
+> 想同时提供元数据与免 npm 安装，只能走 npm 发布（`pi install npm:…` 仍然需要 npm），或者让大家用
+> 「下载 ZIP → `pi install <目录>`」这条路。
+
+### Windows / 没有 npm 的方法
+
+上面第 1 条只需要 **git**。如果连 git 都不想装：
+
+```powershell
+# a. 页面上 Code → Download ZIP，解压后让 pi 指向目录（本地来源完全不会调包管理器）
+pi install C:\Users\<你>\Downloads\deemo-style
+
+# b. 或者手动放到扩展目录（两个都要放，别只拷 ui-style.ts）
+#    <agent-dir>\extensions\ui-style.ts
+#    <agent-dir>\extensions\ui-style.modules\
+```
+
 几条实测过的注意点（pi **1.5.2**）：
 
 - **`-e` 只接受"文件 / 目录路径"**，`pi -e git:…`、`pi -e npm:…` 这种包来源在 1.5.2 里不生效（会被当成一个不存在的路径而**静默跳过**，不报错）。
-- **支持** `git:github.com/DeemoMoon/deemo-style`、`https://github.com/DeemoMoon/deemo-style`、`npm:包名`；
+- **支持** `git:github.com/DeemoMoon/deemo-style`、`https://github.com/DeemoMoon/deemo-style`；
   **不支持** scp 形式 `git@github.com:DeemoMoon/deemo-style.git`（`parseGitUrl` 解析不出来，会被当成本地路径）。
   也就是说：`git clone` 用 SSH 没问题，但 `pi install` 要写成 `git:github.com/DeemoMoon/deemo-style`。
-- `pi install` 认 **git / npm / 目录** 三种来源；`.tgz` / `.zip` 压缩包不算包来源，
-  想发压缩包的话，让对方解压后把 `ui-style.ts` 和 `ui-style.modules/` 一起放进
-  `~/.pi/agent/extensions/`。
 - 本地目录安装是**就地加载**（不复制文件），改完代码 `/reload` 即可生效。
 
-⚠️ **不要和手工复制的副本同时存在**。如果你之前把 `ui-style.ts` 直接放进 `~/.pi/agent/extensions/`，请先删掉
-（`~/.pi/agent/extensions/ui-style.ts` 和 `ui-style.modules/`），否则两个实例会互相摘补丁。
+⚠️ **不要和手工复制的副本同时存在**。如果你之前把 `ui-style.ts` 直接放进 `<agent-dir>/extensions/`，请先删掉
+（`ui-style.ts` 和 `ui-style.modules/`），否则两个实例会互相摘补丁。
 
 ## 它做了什么
 
@@ -109,8 +138,10 @@ export const FEATURES = {
 ```bash
 cd deemo-style
 git push                                     # remote: git@github.com:DeemoMoon/deemo-style.git（默认分支 master）
-git tag v1.0.0 && git push origin v1.0.0     # 之后可用 git:…@v1.0.0 固定版本
+git tag v1.1.0 && git push origin v1.1.0     # 之后可用 git:…@v1.1.0 固定版本
 ```
+
+没有 `package.json` 就没有 `version` 字段，所以版本靠 **git tag** 表达，更新说明写在本文件与 `CHANGELOG.md`。
 
 改完代码后：
 

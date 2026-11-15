@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0] - 2026-11-15
+
+### 打包方式变更：去掉 `package.json`
+- **原因**：pi 安装 git 来源时，只要目录里有 `package.json` 就会跑包管理器安装依赖
+  （本项目没有任何运行时依赖）。在没装 Node.js 的 Windows 机器上会直接失败：
+  `'npm' is not recognized…` → `Error: spawn npm ENOENT`，且 pi 会删掉 clone 出来的目录。
+- **现在**：仓库不含 `package.json`，pi 按约定目录 `extensions/*.ts` 发现扩展，
+  `pi install git:` 不再触发 npm —— **只需要 git**。
+- 代价：没有 `version` 字段（升级不弹 changelog，看本文件）、不在 pi.dev 画廊；
+  版本改用 **git tag** 表达（`@v1.1.0` 仍可固定）。
+- 本地目录安装 / `pi -e <目录>` / 下载 ZIP 三种方式都不受影响。
+
+
 ## [1.0.3] - 2026-11-15
 
 ### 加了一道静态检查（防 1.0.2 那类事故）
