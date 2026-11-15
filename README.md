@@ -13,21 +13,31 @@
 ## 安装
 
 ```bash
-# 从 git 安装（推荐）
+# 1) 从 git 安装（推荐）
 pi install git:github.com/<你的账号>/deemo-style
 
-# 或试用一次，不写进设置
-pi -e git:github.com/<你的账号>/deemo-style
+#    固定到某个版本
+pi install git:github.com/<你的账号>/deemo-style@v1.0.0
 
-# 本地开发时直接指向目录
-pi install ./deemo-style
+# 2) 已经 clone 到本地
+pi install /path/to/deemo-style     # 从任意目录指向包目录
+pi install .                        # 已经在仓库里
+
+# 3) 只想试一次、不写进设置（-e 加载完即忘）
+pi -e /path/to/deemo-style
 ```
 
 装完在 pi 里执行 `/reload`（或重启）。
 
-> 注意：`pi install` 认 **git / npm / 目录** 三种来源；`.tgz` / `.zip` 这类压缩包不算包来源
-> （会被当成"单个扩展文件"处理）。想发压缩包的话，让对方解压后把 `ui-style.ts` 和
-> `ui-style.modules/` 一起放进 `~/.pi/agent/extensions/` 即可。
+几条实测过的注意点（pi **1.5.2**）：
+
+- **`-e` 只接受"文件 / 目录路径"**，`pi -e git:…`、`pi -e npm:…` 这种包来源在 1.5.2 里不生效（会被当成一个不存在的路径而**静默跳过**，不报错）。
+- **支持** `git:github.com/你/仓库`、`https://github.com/你/仓库`、`npm:包名`；
+  **不支持** scp 形式 `git@github.com:你/仓库.git`。
+- `pi install` 认 **git / npm / 目录** 三种来源；`.tgz` / `.zip` 压缩包不算包来源，
+  想发压缩包的话，让对方解压后把 `ui-style.ts` 和 `ui-style.modules/` 一起放进
+  `~/.pi/agent/extensions/`。
+- 本地目录安装是**就地加载**（不复制文件），改完代码 `/reload` 即可生效。
 
 ⚠️ **不要和手工复制的副本同时存在**。如果你之前把 `ui-style.ts` 直接放进 `~/.pi/agent/extensions/`，请先删掉
 （`~/.pi/agent/extensions/ui-style.ts` 和 `ui-style.modules/`），否则两个实例会互相摘补丁。
