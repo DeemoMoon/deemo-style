@@ -34,17 +34,20 @@ export function formatCwd(cwd: string): string {
 	return rest ? `~/${rest}` : "~";
 }
 
-/** 目录太长时从左边砍，保住末尾的项目名；连末尾都塞不下才硬截断。 */
-export function shortenPathLine(path: string, budget: number): string {
+/**
+ * 目录太长时从左边砍，保住末尾的项目名；连末尾都塞不下才硬截断。
+ * `ellipsis` 默认用单个 “…”（比 "..." 省列）；调用方需要 ASCII 时可覆盖。
+ */
+export function shortenPathLine(path: string, budget: number, ellipsis = "…"): string {
 	if (budget <= 0) return "";
 	if (visibleWidth(path) <= budget) return path;
 
 	const segments = path.split("/").filter(Boolean);
 	// 从多保留到少保留，找到第一个塞得下的
 	for (let keep = segments.length - 1; keep >= 1; keep--) {
-		const candidate = `…/${segments.slice(-keep).join("/")}`;
+		const candidate = `${ellipsis}/${segments.slice(-keep).join("/")}`;
 		if (visibleWidth(candidate) <= budget) return candidate;
 	}
-	return truncateToWidth(path, budget, "...");
+	return truncateToWidth(path, budget, ellipsis);
 }
 

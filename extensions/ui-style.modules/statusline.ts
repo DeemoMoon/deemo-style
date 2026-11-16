@@ -19,7 +19,6 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 import {
-	join,
 } from "node:path";
 import {
 	BOLD_OFF,
@@ -55,13 +54,16 @@ const MIN_BAR_CELLS = 3;
 /**
  * git 状态的缓存时长：避免每帧都 fork 一个 git 进程。
  * 状态栏的渲染节拍来自统一 tick / spinner（80~100ms），4s 意味着任务期间
- * 每秒都要 fork 一个 git；分支/改动本来就是给人看的低频信息，4s 足够实时。
+ * 每 4 秒 fork 一个 git；分支/改动本来就是给人看的低频信息，4s 足够实时。
  */
 const GIT_STATUS_TTL_MS = 4000;
 /** git status 失败/超时后的重试间隔（避免大仓库持续 fork+kill 循环）。 */
 const GIT_STATUS_ERROR_TTL_MS = 15_000;
 
-/** pi 的 usage.cost 单位是美元；显示 ￥ 前按此汇率换算。 */
+/**
+ * pi 的 usage.cost 单位是美元；显示 ￥ 前按此近似汇率换算。
+ * 这是固定值，会随真实汇率漂移，不用于对账；需要精确时可改成可配置。
+ */
 const USD_TO_CNY = 7.2;
 
 interface GitStatus {

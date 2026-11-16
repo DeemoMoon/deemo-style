@@ -8,27 +8,22 @@
  */
 
 import {
-	Spacer,
 	foregroundAnsi,
-	type TUI,
 } from "@earendil-works/pi-tui";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
-	Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
 	UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import {
-	join,
 } from "node:path";
 import {
 	BOLD_OFF,
 	BOLD_ON,
 	FEATURES,
 	hasVisibleText,
-	GUTTER,
 	LEADING_CONTROL,
 	LEADING_SPACES,
 	PI_OUTPUT_PAD,
@@ -52,10 +47,23 @@ const USER_PAD_SHIFT = PI_OUTPUT_PAD;
 
 interface UserMessageRuntime {
 	render(width: number): string[];
+	invalidate?(): void;
+	/** UserMessageComponent 的运行时字段。 */
+	text?: string;
+	outputPad?: number;
 	__piUserPadPatched?: boolean;
 	__piUserPadOriginalRender?: (width: number) => string[];
 	/** 我们打上去的 render 本身（所有权校验用） */
 	__piUserPadPatchedRender?: (width: number) => string[];
+	__piUserPadOriginalInvalidate?: () => void;
+	__piUserPadPatchedInvalidate?: () => void;
+	/** 按宽度 + 文本 + padding 缓存的变换结果。 */
+	__piUserPadCache?: {
+		width: number;
+		text: string | undefined;
+		outputPad: number | undefined;
+		lines: string[];
+	};
 }
 
 /**
@@ -71,6 +79,19 @@ export function patchUserMessagePad(): void {
 
 	proto.__piUserPadOriginalRender = proto.render;
 	const patchedRender = function (this: UserMessageRuntime, width: number): string[] {
+		// pi 的 ScrollView 每帧会重渲染整个 transcript；Markdown 自己按宽度缓存，
+		// 但这里对每一行再去 ANSI/空格/尾行处理仍是 O(总行数)。缓存按
+		// (宽度, 文本, padding) 命中；invalidate() 时清空，主题切换不会拿旧颜色。
+		const cached = this.__piUserPadCache;
+		if (
+			cached !== undefined &&
+			cached.width === width &&
+			cached.text === this.text &&
+			cached.outputPad === this.outputPad
+		) {
+			return cached.lines;
+		}
+
 		const lines = proto.__piUserPadOriginalRender?.call(this, width) ?? [];
 		if (USER_PAD_SHIFT <= 0) return lines;
 		// 行首可能有 OSC 133 标记、背景重置/颜色等 CSI 序列（例如 \x1b[49m），
@@ -98,31 +119,59 @@ export function patchUserMessagePad(): void {
 				(LEADING_CONTROL.exec(shifted[end - 1] ?? "")?.[0] ?? "") + trailingMarkers;
 			end--;
 		}
-		if (end === shifted.length) return shifted;
-		const trimmed = shifted.slice(0, end);
-		if (trailingMarkers !== "") {
-			trimmed[end - 1] = (trimmed[end - 1] ?? "") + trailingMarkers;
+		let result = shifted;
+		if (end !== shifted.length) {
+			result = shifted.slice(0, end);
+			if (trailingMarkers !== "") {
+				result[end - 1] = (result[end - 1] ?? "") + trailingMarkers;
+			}
 		}
-		return trimmed;
+		this.__piUserPadCache = {
+			width,
+			text: this.text,
+			outputPad: this.outputPad,
+			lines: result,
+		};
+		return result;
 	};
 	proto.render = patchedRender;
 	proto.__piUserPadPatchedRender = patchedRender;
 	proto.__piUserPadPatched = true;
+
+	const originalInvalidate = proto.invalidate;
+	if (typeof originalInvalidate === "function") {
+		proto.__piUserPadOriginalInvalidate = originalInvalidate;
+		const patchedInvalidate = function (this: UserMessageRuntime): void {
+			this.__piUserPadCache = undefined;
+			originalInvalidate.call(this);
+		};
+		proto.invalidate = patchedInvalidate;
+		proto.__piUserPadPatchedInvalidate = patchedInvalidate;
+	}
 }
 
 /** 恢复 pi 原来的用户消息渲染方法。 */
 export function unpatchUserMessagePad(): void {
 	const proto = UserMessageComponent.prototype as unknown as UserMessageRuntime;
-	// 只在自己仍然拥有这个槽位时才恢复（/reload 时新实例可能已经打过补丁）
-	if (!proto.__piUserPadPatchedRender || proto.render !== proto.__piUserPadPatchedRender) {
-		return;
-	}
-	if (proto.__piUserPadOriginalRender) {
+	// 只在自己仍然拥有槽位时才恢复（/reload 时新实例可能已经打过补丁）
+	const ownsRender = proto.render === proto.__piUserPadPatchedRender;
+	const ownsInvalidate = proto.invalidate === proto.__piUserPadPatchedInvalidate;
+	if (!ownsRender && !ownsInvalidate) return;
+
+	if (ownsRender && proto.__piUserPadOriginalRender) {
 		proto.render = proto.__piUserPadOriginalRender;
+		delete proto.__piUserPadOriginalRender;
+		delete proto.__piUserPadPatchedRender;
 	}
-	delete proto.__piUserPadOriginalRender;
-	delete proto.__piUserPadPatchedRender;
-	delete proto.__piUserPadPatched;
+	if (ownsInvalidate && proto.__piUserPadOriginalInvalidate) {
+		proto.invalidate = proto.__piUserPadOriginalInvalidate;
+		delete proto.__piUserPadOriginalInvalidate;
+		delete proto.__piUserPadPatchedInvalidate;
+	}
+	if (ownsRender || ownsInvalidate) {
+		delete proto.__piUserPadCache;
+		delete proto.__piUserPadPatched;
+	}
 }
 /** Theme 的 fg/bg 使用构造时缓存的 ANSI Map，这里只改用户消息用到的两个 token。 */
 interface ThemeInternals {

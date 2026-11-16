@@ -59,17 +59,12 @@ export function levelRgb(percent: number | null | undefined): Rgb {
 	return LEVEL_BAR_FILL[levelOf(percent)];
 }
 
-/** 缓存命中率 → 颜色（数字与色条用同一套）。 */
-export function hitRateRgb(rate: number | null | undefined): Rgb {
-	return LEVEL_BAR_FILL[hitRateLevel(rate)];
-}
-
 /** 缓存命中率 → 降饱和数字色。 */
 export function hitRateMuted(rate: number | null | undefined): Rgb {
 	return LEVEL_MUTED[hitRateLevel(rate)];
 }
 
-/** 色条字形：状态栏用 ▣□（细），信息面板用 █░（粗）。 */
+/** 色条字形：状态栏用 ▣□（细）；"block" 目前仅测试/备用，生产只走 "box"。 */
 export type BarStyle = "box" | "block";
 
 const BAR_GLYPHS: Record<BarStyle, { filled: string; empty: string }> = {

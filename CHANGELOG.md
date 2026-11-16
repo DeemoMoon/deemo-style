@@ -1,5 +1,58 @@
 # Changelog
 
+## [1.2.0] - 2026-11-17
+
+### 会话信息面板改版（`alt+i`）
+- 「概览」保留会话名 / 模型 / 思考强度（可改）+ 会话总时长 / 分支 / 目录；
+  「加载」显示当前会话已启用的技能 / 扩展 / MCP（`startup.ts` 共享扫描）。
+- 移除面板里的 token / 费用 / 上下文占用：这些数字由信息条与状态栏常驻显示，
+  面板改为低频信息与资源清单。
+- 修复鼠标命中：`‹ ›`、模型/思考值、会话名光标都补上了边框的 2 列偏移；
+  点标题栏/底边框不再误触发内容行操作。
+- 下拉打开时滚轮滚动下拉项，不再滚外层面板；下拉顶/中/底边框等宽。
+- 底边框的成功/失败提示恢复颜色；切换模型 busy 时仍可用 Esc/q 关闭。
+- 当前模型不在可切换列表时（`modelIndex = -1`），`←→` 不再跳过第一项。
+
+### 修复
+- **思考预览只显示最后一段**：`ThinkingPreviewView.cacheKey()` 不再调用会写状态的
+  `snapshot()`，多段连续 thinking 在运行中会正确 join 并显示「上面还有内容」。
+- **`!` 命令单条超长行**：修正字节上限对最后一行的豁免，并增加单行长度 +
+  换行后可视行数封顶，折叠/展开都不会再爆出无界行数。
+- **`bash-exec` 异常回退后的孤儿视图**：catch 分支清理 `__piExecView`，下次重新挂载。
+- **`formatIndentedPreview` 忽略 `options.keyHint`**：自定义键位提示现在生效。
+- **阅读辅助行数 key**：优先使用 pi-ai message 的数字 timestamp；历史消息也能记录，
+  `resume`/重渲染后跳转不再依赖偶然的 key 0。
+- **启动资源扫描**：
+  - `promptOptions.contextFiles / skills` 为空数组时视为权威空结果，不再回退到扫盘；
+  - 已有 promptOptions 时跳过对应磁盘扫描；
+  - 启动页与信息面板共享 in-flight Promise，首次打开只扫一次；
+  - 信息面板 `r` 用 `force` 真正重扫技能/扩展/MCP；
+  - 扩展收集复用 Dirent 已得到的类型，避免二次全量 stat；
+  - 新增技能后不带 force 仍读缓存，force 后才刷新。
+- **用户消息 render 缓存**：按宽度/文本/padding 缓存行变换，并 patch `invalidate()`
+  清缓存，长会话每帧不再重复跑逐行正则。
+- **动画 tick 异常隔离**：单个 listener 抛错不再变成 uncaught exception。
+- **上下文占用缓存 key** 增加 provider，避免同 id 不同 provider 命中错误缓存。
+- `formatDuration` / `formatTokens` 边界修正（`59.96s`、`999999`）。
+- 实时尾窗切片避开半个 ANSI 序列与代理对；`tailVisualRows` 切尾避开孤立 surrogate。
+
+### 重构 / 清理
+- 拆出 `edit-preview.ts`（参数归一、fuzzy/唯一/重叠匹配、unified diff），并补独立单测。
+- 路径缩短统一为 `path-text.shortenPathLine()`，删除 `core.summarizePath` 与
+  `info-panel.shortenForPanel`。
+- 删除生产 dead code：`core.str` / `tailLines`、`context-bar.hitRateRgb`、
+  `info-panel.centerIn` / `levelIndex` / `BuildOptions.message`。
+- `RuntimePrototype.timestamp` 类型改为 `string | number`，并补 `__piAssistantStyleTimestamp`。
+- `static-check.mjs` 增加「import 了但正文未使用」检查，并清掉全部未使用 import。
+- edit 预览不再对每个 edit 重新 normalize 整个文件（O(edits × 文件大小) → O(文件大小)）。
+- 文档同步：信息面板内容、`alt+i` 说明、测试数量、LIVE_TAIL_CHARS / git TTL / 汇率注释。
+
+### 测试
+- 85 个测试：新增多段 thinking 预览、`!` 超长行、下拉滚轮、keyHint 覆盖、
+  鼠标左右箭头/标题栏/底边框、窄终端面板、promptOptions 空数组与 force 重扫、
+  edit-preview 语义一致性等回归用例。
+
+
 ## [1.1.0] - 2026-11-15
 
 ### 打包方式变更：去掉 `package.json`

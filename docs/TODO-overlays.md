@@ -79,7 +79,7 @@ await ctx.ui.custom(
 
 | # | 面板 | 内容 | 数据来源 | 成本 | 评价 |
 |---|---|---|---|---|---|
-| 1 | **环境信息面板**（`alt+i`） | 模型 `id(provider)` / 上下文窗口 / 思考等级 / 会话名 / 会话 id / 会话文件 / cwd / 分支 / 上下文占用 + 色条 / 累计费用 / 缓存命中率 / git 状态 / 工具数 / 技能与扩展数 / pi 版本 | `ctx.model`、`ctx.thinkingLevel`、`ctx.sessionManager.*`、`ctx.getContextUsage()`、`pi.getActiveTools()`、`pi.getSettings()`、`pi.exec("git",…)`、`VERSION` | ~120 | **✅ 已实现**（`info-panel.ts` + `session-stats.ts`，`alt+i`；带边框居中、可改会话名/模型/思考强度、模型与思考用 `SelectList` 内联下拉、支持鼠标点击） |
+| 1 | **环境信息面板**（`alt+i`） | 模型 `id(provider)` / 思考等级 / 会话名 / 会话总时长 / 分支 / cwd / 已加载技能 / 扩展 / MCP 清单 | `ctx.model`、`ctx.thinkingLevel`、`ctx.sessionManager.*`、`computeSessionStats()`、`collectSessionResources()`（startup.ts + mcp.json） | ~120 | **✅ 已实现**（`info-panel.ts` + `session-stats.ts` + `startup.ts` 的资源扫描，`alt+i`；带边框居中、可改会话名/模型/思考强度、模型与思考用 `SelectList` 内联下拉、支持鼠标点击） |
 | 2 | 环境面板「可改」版 | 同 1，且能改 | 同上 + `pi.setModel/setThinkingLevel/setSessionName/setActiveTools` | ~200 | 省掉 `/model`、`/thinking` 两步 |
 | 3 | 消息/轮次浏览器 | 本轮或最近 N 轮完整对话（正文 Markdown、思考可切、工具压一行） | `sessionManager.getBranch()` | ~300 | 工作量最大，见 §4 |
 | 4 | 技能/扩展清单 | 名字、启用状态、路径、SKILL.md 首行 | 复用 `startup.ts` 的 `collectStartupData()` | ~150 | 回车预览；**不建议**在这里写 settings |

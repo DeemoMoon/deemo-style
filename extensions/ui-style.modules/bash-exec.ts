@@ -17,7 +17,6 @@ import {
 	keyHint,
 } from "@earendil-works/pi-coding-agent";
 import {
-	join,
 } from "node:path";
 import {
 	ACCENT_GREEN,
@@ -51,6 +50,8 @@ const MAX_EXEC_DISPLAY_LINES = 1000;
  * 不设的话，超长行的输出在展开态会显示得比"模型实际看到的内容"还多。
  */
 const MAX_EXEC_DISPLAY_BYTES = 50 * 1024;
+/** 折叠态最多显示的“可视行”数（源行换行后可能远多于源行数）。 */
+const MAX_EXEC_COLLAPSED_ROWS = EXEC_PREVIEW_LINES * 2;
 
 interface BashExecLike {
 	command: string;
@@ -278,13 +279,22 @@ class ExecBoxView {
 		const all = this.inst.outputLines;
 		let capped = all.length > MAX_EXEC_DISPLAY_LINES ? all.slice(-MAX_EXEC_DISPLAY_LINES) : all;
 
-		// 再按字节从尾部往前收（至少留一行）
+		// 再按字节从尾部往前收（至少留一行）。
+		// 注意：不能因为“当前是最后一行”就跳过检查——单行 500KB 的输出
+		// 会原样留下来，随后被 wrap 成几千条可视行。
 		let bytes = 0;
 		let start = capped.length;
 		while (start > 0) {
 			const line = capped[start - 1] ?? "";
 			const next = bytes + line.length + 1;
-			if (next > MAX_EXEC_DISPLAY_BYTES && start < capped.length) break;
+			if (next > MAX_EXEC_DISPLAY_BYTES) {
+				if (start === capped.length) {
+					// 全文只有这一行（或它是唯一保留的行）：只保留尾部字节。
+					capped = [line.slice(Math.max(0, line.length - MAX_EXEC_DISPLAY_BYTES))];
+					start = 0;
+				}
+				break;
+			}
 			bytes = next;
 			start -= 1;
 		}
@@ -293,16 +303,25 @@ class ExecBoxView {
 		return this.inst.expanded ? capped : capped.slice(-EXEC_PREVIEW_LINES);
 	}
 
-	/** 输出：折叠显示末尾 EXEC_PREVIEW_LINES 行，展开显示全部（有上限）。 */
+	/**
+	 * 输出：折叠显示末尾 EXEC_PREVIEW_LINES 行，展开显示全部（有上限）。
+	 *
+	 * 除了源行数/字节数，还要限制**换行后的可视行数**：一条没有换行的
+	 * 长行在 80 列下能变成几十上百行，仅靠源行数封顶挡不住。
+	 */
 	private outputSegments(inner: number): string[] {
 		const display = this.displayLines();
+		const lineLimit = Math.max(256, inner * 4);
 		const segments: string[] = [];
 		for (const line of display) {
-			for (const wrapped of wrapTextWithAnsi(line ? `${MUTED}${line}${RESET_FG}` : "", inner)) {
+			const safeLine =
+				line.length > lineLimit ? `${line.slice(0, lineLimit)}…` : line;
+			for (const wrapped of wrapTextWithAnsi(safeLine ? `${MUTED}${safeLine}${RESET_FG}` : "", inner)) {
 				segments.push(wrapped);
 			}
 		}
-		return segments;
+		const rowCap = this.inst.expanded ? MAX_EXEC_DISPLAY_LINES : MAX_EXEC_COLLAPSED_ROWS;
+		return segments.length > rowCap ? segments.slice(-rowCap) : segments;
 	}
 
 	/** 结束态的状态区：折叠提示 / 取消 / 退出码 / 截断提示。 */
@@ -365,6 +384,10 @@ export function patchBashExec(): void {
 		} catch {
 			// 这里完全替换了 pi 的 updateDisplay：万一 pi 改了内部布局导致重建失败，
 			// 宁可退回 pi 自己的渲染，也不要把整块输出打没。
+			// 原生 updateDisplay() 会 clear + 重建 children；缓存的 ExecBoxView
+			// 如果还留在实例上，下次 updateDisplay 只会 invalidate 而不会重新挂载，
+			// 变成孤儿视图。这里顺手丢掉，让下次从原生组件重建。
+			this.__piExecView = undefined;
 			proto.__piBashExecOriginalUpdateDisplay?.call(this);
 		}
 	};

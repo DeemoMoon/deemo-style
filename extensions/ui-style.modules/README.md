@@ -10,6 +10,7 @@
 |---|---|
 | `core.ts` | **共享层**：`FEATURES` 开关、对齐系统与配色常量、块计时（BlockClock）、文本/路径/预览格式化、折叠预览算法、上下文占用缓存、`CachedView`（按宽度缓存的视图基类） |
 | `panels.ts` | 工具面板（bash / codemode / read / write / edit / grep / find / ls / powershell）；收起态统一 3 行尾窗，展开态 ls 用圆角框 |
+| `edit-preview.ts` | edit 工具的**执行中 diff 预览**：参数归一、与 pi edit 同语义的精确/fuzzy 匹配、唯一命中/重叠检查、unified diff；独立成模块便于单测 |
 | `assistant.ts` | 助手消息原型补丁（悬挂缩进 / 去背景 / 思考块折叠预览 / 鼠标坐标换算） |
 | `skill-banner.ts` | 技能调用横幅原型补丁 |
 | `bash-exec.ts` | `!` 内联命令的绿色圆角框（原型补丁） |
@@ -20,9 +21,9 @@
 | `levels.ts` | 思考档位（顺序 / 模型能力过滤 / 配色），状态栏与信息面板共用 |
 | `context-bar.ts` | 上下文色条与档位阈值（`renderContextBar` / `levelOf`），两处共用 |
 | `session-stats.ts` | **会话统计口径**（token / 费用 / 缓存命中率 / 轮次 / 用时），状态栏与信息面板共用 |
-| `info-panel.ts` | **会话信息面板**（`alt+i`）：带边框居中的 overlay；改会话名 / 模型（下拉 + fuzzy 过滤）/ 思考强度，支持鼠标点击（行聚焦、点模型/思考的值展开下拉、`‹ ›` 快切、双击改名、点选下拉项、滚轮），并显示 token / 缓存 / 费用 / 上下文 / 用时 / 目录；模型与思考是内联下拉 |
+| `info-panel.ts` | **会话信息面板**（`alt+i`）：带边框居中的 overlay；改会话名 / 模型（下拉 + fuzzy 过滤）/ 思考强度，支持鼠标点击（行聚焦、点模型/思考的值展开下拉、`‹ ›` 快切、双击改名、点选下拉项、滚轮），并显示会话总时长 / 分支 / 目录与已加载的技能 / 扩展 / MCP 清单（startup.ts 共享扫描）；模型与思考是内联下拉 |
 | `reading.ts` | 阅读辅助：整轮结束后把视口带回回复开头 |
-| `startup.ts` | 启动页（异步扫描上下文/技能/扩展） |
+| `startup.ts` | 启动页（异步扫描上下文/技能/扩展，in-flight 去重 + 按 cwd 缓存）；也是信息面板「加载」区的数据来源（`collectSessionResources()`，含 mcp.json 扫描；`force` 支持面板 `r` 重扫） |
 | `extension.ts` | 默认导出：按 `FEATURES` 注册一切 |
 | `tests/` | 单测 + 行为测试 |
 | `TODO-overlays.md` | **待做**：overlay（弹窗）面板候选清单与结论（#1 信息面板已完成） |
@@ -46,7 +47,8 @@ bash ui-style.modules/tests/run.sh
 - `tests/pure.test.ts`：纯函数（格式化、折叠预览、ANSI 清洗、BlockClock…）。
 - `tests/behavior.test.ts`：用 pi 自己的加载器（jiti）加载扩展，断言具体行为
   （OSC133 标记、thinking 折叠/展开、`!` 回放计时、edit 异步预览、极窄终端
-  不输出超宽行…）。
+  不输出超宽行、面板鼠标命中、超长行可视行封顶…）。
+- `tests/static-check.mjs`：检查「用了别的模块导出却没 import」和「import 了但正文未使用」。
 
 ## 改 pi 内部实现时的注意点
 

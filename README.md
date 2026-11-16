@@ -19,7 +19,7 @@
 pi install git:github.com/DeemoMoon/deemo-style
 
 #    固定到某个版本（tag 仍然可用）
-pi install git:github.com/DeemoMoon/deemo-style@v1.1.0
+pi install git:github.com/DeemoMoon/deemo-style@v1.2.0
 
 # 2) 已经 clone 到本地
 pi install /path/to/deemo-style     # 从任意目录指向包目录
@@ -86,7 +86,7 @@ pi install C:\Users\<你>\Downloads\deemo-style
 | 信息条（输入框上方） | 输入/输出 token、速度档图标（呼吸）、首字延迟、耗时 |
 | 状态栏（输入框下方） | 模型/思考强度/缓存命中率/费用/总 token + 上下文色条 + 会话名/git/目录 |
 | 启动页 | logo + 上下文文件 / 技能 / 扩展清单（异步扫描，不卡首帧） |
-| 会话信息面板 | `alt+i` 打开：会话名、模型、思考强度可直接改；token、缓存、费用、上下文、用时、目录一屏看完 |
+| 会话信息面板 | `alt+i` 打开：会话名、模型、思考强度可直接改；会话总时长、分支、目录与已加载的技能/扩展/MCP 一屏看完 |
 | 阅读辅助 | 长回复生成结束后，视口自动回到这条回复的开头（不再停在末尾） |
 
 ## 键位
@@ -138,7 +138,7 @@ export const FEATURES = {
 ```bash
 cd deemo-style
 git push                                     # remote: git@github.com:DeemoMoon/deemo-style.git（默认分支 master）
-git tag v1.1.0 && git push origin v1.1.0     # 之后可用 git:…@v1.1.0 固定版本
+git tag v1.2.0 && git push origin v1.2.0     # 之后可用 git:…@v1.2.0 固定版本
 ```
 
 没有 `package.json` 就没有 `version` 字段，所以版本靠 **git tag** 表达，更新说明写在本文件与 `CHANGELOG.md`。
@@ -146,9 +146,10 @@ git tag v1.1.0 && git push origin v1.1.0     # 之后可用 git:…@v1.1.0 固�
 改完代码后：
 
 ```bash
-bash scripts/smoke.sh          # 测试 + 干净环境安装 + 真实加载
-# 更新 package.json 的 version 与 CHANGELOG.md（pi 会在更新后自动展示变更）
+bash scripts/smoke.sh          # 测试 + 静态检查 + 干净环境安装 + 真实加载
+# 更新 CHANGELOG.md，然后提交；版本用 git tag 表达（本仓库没有 package.json）
 git commit -am "feat: ..." && git push
+git tag v1.2.0 && git push origin v1.2.0
 ```
 
 ## 目录结构
@@ -162,6 +163,7 @@ extensions/ui-style.modules/
   context-bar.ts    上下文色条 + 档位阈值
   session-stats.ts  会话统计口径（token / 费用 / 缓存 / 用时）
   panels.ts         工具面板
+  edit-preview.ts   edit 工具的执行中 diff 预览（与 pi edit 语义对齐）
   assistant.ts      助手消息（原型补丁）
   user-message.ts   用户消息（原型补丁 + markdown 变换）
   skill-banner.ts   技能横幅（原型补丁）
@@ -172,7 +174,7 @@ extensions/ui-style.modules/
   startup.ts        启动页
   info-panel.ts     会话信息面板（alt+i）
   reading.ts        长回复结束后跳回开头
-  tests/            78 个单测 + 行为测试
+  tests/            85 个单测 + 行为测试
 ```
 
 ## 测试
@@ -181,7 +183,7 @@ extensions/ui-style.modules/
 bash extensions/ui-style.modules/tests/run.sh
 ```
 
-测试用 pi 自带的 jiti 加载器真实加载扩展，并断言具体行为（面板行宽、补丁所有权、下拉交互、鼠标命中等）。
+测试用 pi 自带的 jiti 加载器真实加载扩展，并断言具体行为（面板行宽、补丁所有权、下拉交互、鼠标命中、超长行封顶等）。`static-check.mjs` 同时检查缺失/未使用的 import。
 
 ## 许可证
 

@@ -33,9 +33,7 @@ import {
 	shortenHome,
 	stripAnsi,
 	stripBom,
-	tailLines,
 	tailVisualRows,
-	summarizePath,
 	touchClock,
 	trimZero,
 	formatCwd,
@@ -49,19 +47,21 @@ import {
 	modelLabel,
 	panelInnerWidth,
 	clampScroll,
-	exactTokens,
 	panelViewport,
-	tokenCell,
 } from "../info-panel.ts";
 import { computeSessionStats } from "../session-stats.ts";
 import {
 	renderContextBar,
 	levelOf,
 	hitRateLevel,
-	hitRateRgb,
 	levelRgb,
 	LEVEL_BAR_FILL,
 } from "../context-bar.ts";
+import {
+	applyPreviewEdits,
+	getPreviewInput,
+	normalizeForFuzzyMatch,
+} from "../edit-preview.ts";
 import { supportedThinkingLevels } from "../levels.ts";
 import { stripBackgroundSgr } from "../assistant.ts";
 
@@ -130,14 +130,6 @@ test("shortenTail：ASCII 快路径与宽字符都收在宽度内", () => {
 	assert.ok(cjk.endsWith("路径"));
 });
 
-test("summarizePath：放不下时保留末尾几段", () => {
-	const long = "/home/user/projects/app/src/components/video.tsx";
-	const out = summarizePath(long, 20);
-	assert.ok(out.length <= 20);
-	assert.ok(out.endsWith("video.tsx"));
-	assert.ok(summarizePath("/a/b.ts", 40) === "/a/b.ts");
-});
-
 test("headLinesOfTexts：只留头部行但总数算全", () => {
 	const source = headLinesOfTexts(["a\nb", "c"], 2);
 	assert.deepEqual(source.head, ["a", "b"]);
@@ -171,6 +163,13 @@ test("moreLinesNoun 单复数", () => {
 	assert.equal(moreLinesNoun(2), "lines");
 });
 
+test("formatIndentedPreview：优先使用调用方传入的 keyHint", () => {
+	const out = formatIndentedPreview(["a", "b", "c", "d", "e"], false, false, plainTheme, 40, {
+		keyHint: (binding, description) => `[${binding}:${description}]`,
+	});
+	const text = out.join("\n");
+	assert.ok(text.includes("[app.tools.expand:to expand]"), text);
+});
 test("formatIndentedPreview：空/错误/展开/折叠四种形态", () => {
 	const empty = formatIndentedPreview([""], false, false, plainTheme, 40);
 	assert.deepEqual(empty, ["  ⎿  (无输出)"]);
@@ -272,22 +271,6 @@ test("shimmerText：宽度不变、颜色随时间变化、无起点时退化成
 	assert.equal(visibleWidth(cjk), visibleWidth("思考中"));
 });
 
-test("tailLines：取尾部行，O(窗口)，并报告上面是否还有内容", () => {
-	assert.deepEqual(tailLines("a\nb\nc", 2), { lines: ["b", "c"], more: true });
-	assert.deepEqual(tailLines("a\nb\n", 2), { lines: ["a", "b"], more: false });
-	assert.deepEqual(tailLines("只有一行", 3), { lines: ["只有一行"], more: false });
-	assert.deepEqual(tailLines("", 3), { lines: [], more: false });
-	assert.deepEqual(tailLines("a\nb", 0), { lines: [], more: true });
-	// Windows 换行
-	assert.deepEqual(tailLines("a\r\nb\r\n", 5), { lines: ["a", "b"], more: false });
-	// 长文本只取尾部（不 split 全文）
-	const long = Array.from({ length: 5000 }, (_, i) => `line ${i}`).join("\n");
-	const tail = tailLines(long, 3);
-	assert.deepEqual(tail.lines, ["line 4997", "line 4998", "line 4999"]);
-	assert.equal(tail.more, true);
-});
-
-
 test("tailVisualRows：按可视行封顶（长段落不会把窗口撑爆）", () => {
 	// 一整段 3000 字、没有换行 → 折行后只取最后 6 行
 	const long = "很长的思考内容，".repeat(375);
@@ -373,13 +356,6 @@ test("computeSessionStats：末轮只在最近 2 分钟内补增长（离开去�
 	assert.equal(idle.activeMs, 10_000);
 });
 
-test("exactTokens / tokenCell：千分位 + 缩写", () => {
-	assert.equal(exactTokens(3287), "3,287");
-	assert.equal(exactTokens(13620), "13,620");
-	assert.equal(tokenCell(3287), "3.3k (3,287)");
-	assert.equal(tokenCell(0), "0 (0)");
-});
-
 test("renderContextBar：格子数正确、档位阈值一致（状态栏与面板共用）", () => {
 	assert.equal(levelOf(50), "ok");
 	assert.equal(levelOf(80), "warn");
@@ -412,13 +388,8 @@ test("buildSessionInfoRows：窄宽度下不超宽，长会话名被截断", () 
 		thought: "xhigh",
 		models: [model],
 		modelIndex: 0,
-		levelIndex: 1,
 		sessionName: "一个很长很长的会话名字用来测试截断行为",
 		cwd: "/home/somewhere/very/deep/path/to/project",
-		sessionId: "01JC-0000000000",
-		contextTokens: 12345,
-		contextWindow: 200000,
-		contextPercent: 6.2,
 		stats: {
 			cost: 1.234,
 			cacheHitRate: 92.5,
@@ -435,7 +406,7 @@ test("buildSessionInfoRows：窄宽度下不超宽，长会话名被截断", () 
 			wallMs: 60_000,
 		},
 		entryCount: 12,
-		streaming: true,
+		resources: { skills: ["docx", "web-dev"], extensions: ["ui-style.ts"], mcp: ["filesystem"] },
 	};
 	for (const width of [24, 40, 72, 120]) {
 		const lines = buildSessionInfoRows(view, plainTheme, width).map((row) => row.text);
@@ -445,8 +416,17 @@ test("buildSessionInfoRows：窄宽度下不超宽，长会话名被截断", () 
 	}
 	const wide = buildSessionInfoRows(view, plainTheme, 100).map((row) => stripAnsi(row.text)).join("\n");
 	assert.ok(wide.includes("xhigh"), wide);
-	assert.ok(wide.includes("6.2%"), wide);
-	assert.ok(wide.includes("生成中"), wide);
+	// 概览：时长（wallMs → 1 m 0 s）+ 目录；加载区：技能/扩展/MCP
+	assert.ok(wide.includes("1 m 0 s"), wide);
+	assert.ok(wide.includes("时长"), wide);
+	assert.ok(wide.includes("目录"), wide);
+	assert.ok(wide.includes("加载"), wide);
+	assert.ok(wide.includes("docx · web-dev"), wide);
+	assert.ok(wide.includes("filesystem"), wide);
+	// 用量/时间与位置已经退场：不再渲染 token/上下文/费用/会话 id
+	assert.ok(!wide.includes("6.2%"), wide);
+	assert.ok(!wide.includes("生成中"), wide);
+	assert.ok(!wide.includes("01JC"), wide);
 });
 
 test("supportedThinkingLevels / modelLabel：档位过滤与显示名", () => {
@@ -515,13 +495,8 @@ test("buildSessionInfoRows：下拉行插在字段行之后并带标记", () => 
 		thought: "high",
 		models: [model, { id: "n", provider: "p", reasoning: true }],
 		modelIndex: 0,
-		levelIndex: 0,
 		sessionName: "s",
 		cwd: "/tmp",
-		sessionId: "id",
-		contextTokens: 1,
-		contextWindow: 2,
-		contextPercent: 50,
 		stats: {
 			cost: 0,
 			cacheHitRate: undefined,
@@ -538,7 +513,7 @@ test("buildSessionInfoRows：下拉行插在字段行之后并带标记", () => 
 			wallMs: 0,
 		},
 		entryCount: 0,
-		streaming: false,
+		resources: { skills: [], extensions: [], mcp: [] },
 	};
 	const rows = buildSessionInfoRows(view, plainTheme, 60, {
 		dropdown: { after: "model", lines: ["DROP-1", "DROP-2"] },
@@ -561,13 +536,8 @@ test("buildSessionInfoRows：只有一项可选时不画箭头", () => {
 		thought: "off",
 		models: [model],
 		modelIndex: 0,
-		levelIndex: 0,
 		sessionName: "s",
 		cwd: "/tmp",
-		sessionId: "id",
-		contextTokens: 1,
-		contextWindow: 2,
-		contextPercent: 50,
 		stats: {
 			cost: 0,
 			cacheHitRate: undefined,
@@ -584,7 +554,7 @@ test("buildSessionInfoRows：只有一项可选时不画箭头", () => {
 			wallMs: 0,
 		},
 		entryCount: 0,
-		streaming: false,
+		resources: { skills: [], extensions: [], mcp: [] },
 	};
 	const rows = buildSessionInfoRows(view, plainTheme, 60);
 	for (const row of rows) {
@@ -626,6 +596,39 @@ test("#4 collapsePreviewLines：PreviewSource 的尾部空行不算剩余行数"
 	const fromArray = collapsePreviewLines(["line1", "line2", "line3", "", ""], 1, 80, (l) => l);
 	assert.equal(fromSource.remaining, 2, "应为 2 而不是 4");
 	assert.equal(fromSource.remaining, fromArray.remaining);
+});
+
+test("edit-preview：与 pi edit 同语义（多编辑/fuzzy/唯一命中/重叠）", () => {
+	assert.deepEqual(getPreviewInput({ path: "a", oldText: "x", newText: "y" }), {
+		path: "a",
+		edits: [{ oldText: "x", newText: "y" }],
+	});
+	assert.equal(getPreviewInput({ path: "a" }), undefined);
+
+	const exact = applyPreviewEdits("a\nb\nc", [
+		{ oldText: "a", newText: "A" },
+		{ oldText: "c", newText: "C" },
+	]);
+	assert.ok(!("error" in exact));
+	assert.equal(exact.content, "A\nb\nC");
+
+	// 智能引号走 fuzzy 归一化
+	const fuzzy = applyPreviewEdits("const s = “hello”;", [{ oldText: '"hello"', newText: '"bye"' }]);
+	assert.ok(!("error" in fuzzy));
+	assert.equal(fuzzy.content, 'const s = "bye";');
+	assert.equal(normalizeForFuzzyMatch("“a”"), '"a"');
+
+	const duplicate = applyPreviewEdits("aa", [{ oldText: "a", newText: "b" }]);
+	assert.ok("error" in duplicate && duplicate.error.includes("不唯一"), JSON.stringify(duplicate));
+
+	const overlap = applyPreviewEdits("abcd", [
+		{ oldText: "abc", newText: "x" },
+		{ oldText: "bcd", newText: "y" },
+	]);
+	assert.ok("error" in overlap && overlap.error.includes("重叠"), JSON.stringify(overlap));
+
+	const empty = applyPreviewEdits("abc", [{ oldText: "", newText: "x" }]);
+	assert.ok("error" in empty && empty.error.includes("为空"), JSON.stringify(empty));
 });
 
 test("#5 stripBackgroundSgr：47 / 100 / 48;2 与非法 mode", () => {
@@ -697,7 +700,5 @@ test("缓存命中率方向：越高越好（99.2% 绿、40% 红），别和上�
 	assert.equal(levelOf(99.2), "bad");
 
 	// 颜色映射不能混
-	assert.deepEqual(hitRateRgb(99.2), LEVEL_BAR_FILL.ok);
-	assert.deepEqual(hitRateRgb(40), LEVEL_BAR_FILL.bad);
 	assert.deepEqual(levelRgb(99.2), LEVEL_BAR_FILL.bad);
 });

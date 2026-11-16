@@ -188,6 +188,8 @@ export function unpatchSkillBanner(): void {
 		delete proto.__piSkillStyleOriginalSetPaddingX;
 		delete proto.__piSkillStylePatchedSetPaddingX;
 	}
-	if (ownsDisplay && ownsPadding) delete proto.__piSkillStylePatched;
+	// 只要收回了任意一半所有权，就说明这轮补丁已经不再完整；清掉标记，
+	// 下次 patchSkillBanner() 会重新建立两个槽位。
+	if (ownsDisplay || ownsPadding) delete proto.__piSkillStylePatched;
 }
 

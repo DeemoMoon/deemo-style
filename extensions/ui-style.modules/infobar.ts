@@ -16,7 +16,6 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
-	join,
 } from "node:path";
 import {
 	BAD_RED,

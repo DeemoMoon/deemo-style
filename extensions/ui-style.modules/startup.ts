@@ -4,6 +4,10 @@
  * 这里只做「发现 + 展示」。所有文件系统访问都是**异步**的：启动页在
  * session_start 里就要挂上，同步递归扫描（skills 深度 8 + cwd 各级父目录）
  * 会让第一帧卡住几百毫秒，所以先渲染「扫描中」骨架，扫描完成后再填数据。
+ *
+ * 除启动页外，会话信息面板（info-panel.ts）的「加载」区也从这里取数据：
+ * `collectSessionResources()` 复用同一份按 cwd 的扫描缓存，另外现读
+ * 用户级/项目级 mcp.json 得到 MCP 名单。
  */
 
 import { readFile as readFileAsync, readdir, stat } from "node:fs/promises";
@@ -447,8 +451,15 @@ async function collectSkills(cwd: string, settings: SettingsPair): Promise<Skill
 
 // ---- 扩展 ------------------------------------------------------------------
 
-/** 收集一个扩展目录里的扩展文件与扩展目录（与 pi 的发现规则一致，只看一层）。 */
-async function collectExtensionFilesIn(dir: string, out: string[]): Promise<void> {
+/**
+ * 收集一个扩展目录里的扩展文件与扩展目录（与 pi 的发现规则一致，只看一层）。
+ * 同时记录已经由 Dirent/stat 得到的类型，避免 collectExtensions 再全量 stat 一次。
+ */
+async function collectExtensionFilesIn(
+	dir: string,
+	out: string[],
+	kinds: Map<string, PathKind>,
+): Promise<void> {
 	if ((await statKindAsync(dir)) !== "dir") return;
 
 	for (const entry of await readEntries(dir)) {
@@ -457,7 +468,10 @@ async function collectExtensionFilesIn(dir: string, out: string[]): Promise<void
 
 		if (kind === "dir") {
 			const entries = await Promise.all(EXTENSION_ENTRY_FILES.map((n) => statKindAsync(join(full, n))));
-			if (entries.some((entryKind) => entryKind === "file")) out.push(full);
+			if (entries.some((entryKind) => entryKind === "file")) {
+				out.push(full);
+				kinds.set(full, "dir");
+			}
 			continue;
 		}
 
@@ -467,6 +481,7 @@ async function collectExtensionFilesIn(dir: string, out: string[]): Promise<void
 			!entry.name.endsWith(".d.ts")
 		) {
 			out.push(full);
+			kinds.set(full, "file");
 		}
 	}
 }
@@ -480,18 +495,22 @@ async function collectExtensions(
 	roots.push(...resolveConfiguredPaths(settings.project.extensions, join(cwd, ".pi")));
 
 	const files: string[] = [];
+	const knownKinds = new Map<string, PathKind>();
 	for (const root of uniquePaths(roots)) {
 		const kind = await statKindAsync(root);
-		if (kind === "dir") await collectExtensionFilesIn(root, files);
-		else if (kind === "file") files.push(root);
+		if (kind === "dir") {
+			await collectExtensionFilesIn(root, files, knownKinds);
+		} else if (kind === "file") {
+			files.push(root);
+			knownKinds.set(root, "file");
+		}
 	}
 
 	const unique = uniquePaths(files);
-	const dirKinds = await Promise.all(unique.map((file) => statKindAsync(file)));
 
 	return unique
-		.map((file, index) => {
-			const isDirectory = dirKinds[index] === "dir";
+		.map((file) => {
+			const isDirectory = knownKinds.get(file) === "dir";
 			const name = isDirectory ? `${basename(file)}/` : basename(file);
 			const userEnabled = isEnabledByPatterns(
 				settings.user.extensions,
@@ -512,6 +531,50 @@ async function collectExtensions(
 		.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// ---- MCP ------------------------------------------------------------------
+
+/** mcp.json 里的服务器条目（这里只关心名字与启用状态）。 */
+interface McpEntry {
+	name: string;
+	enabled: boolean;
+}
+
+/** 读一份 mcp.json 的 `mcpServers`（名字 → 启用状态）；读不到 / 坏 JSON → 空。 */
+async function readMcpFile(file: string): Promise<Map<string, boolean>> {
+	const servers = new Map<string, boolean>();
+	const raw = await readTextFile(file);
+	if (raw === undefined) return servers;
+	try {
+		const parsed = JSON.parse(raw) as { mcpServers?: Record<string, unknown> };
+		const entries = parsed.mcpServers;
+		if (entries === null || typeof entries !== "object" || Array.isArray(entries)) return servers;
+		for (const [name, entry] of Object.entries(entries)) {
+			const enabled = !(
+				entry !== null &&
+				typeof entry === "object" &&
+				(entry as { enabled?: unknown }).enabled === false
+			);
+			servers.set(name, enabled);
+		}
+	} catch {
+		// 坏 JSON 就当没有这个文件
+	}
+	return servers;
+}
+
+/** 用户级 + 项目级 mcp.json（项目条目按名字覆盖用户级，与 pi 的规则一致）。 */
+async function collectMcpServers(cwd: string): Promise<McpEntry[]> {
+	const [user, project] = await Promise.all([
+		readMcpFile(join(agentDir(), "mcp.json")),
+		readMcpFile(join(cwd, ".pi", "mcp.json")),
+	]);
+	const merged = new Map(user);
+	for (const [name, enabled] of project) merged.set(name, enabled);
+	return [...merged]
+		.map(([name, enabled]) => ({ name, enabled }))
+		.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** 收集启动页要展示的全部信息（并行扫描三个来源）。 */
 /**
  * 收集启动页数据。
@@ -524,18 +587,27 @@ async function collectExtensions(
 async function collectStartupData(cwd: string, ctx?: ExtensionContext): Promise<StartupData> {
 	const settings = await readResourceSettings(cwd);
 	const promptOptions = readPromptOptions(ctx);
+	const promptContext = promptOptions?.contextFiles;
+	const promptSkills = promptOptions?.skills;
+
+	// promptOptions 存在时，空数组也是权威结果（pi 已经按 ignore/settings 过滤完）。
+	// 不能再用 `.length` 回退到 best-effort 扫描，否则会把 pi 排除掉的资源又显示出来。
+	const hasPromptContext = Array.isArray(promptContext);
+	const hasPromptSkills = Array.isArray(promptSkills);
+
+	// 只有 missing 的那部分才扫盘；否则每次启动都白跑一遍技能树/上下文目录。
 	const [scannedContext, scannedSkills, extensions] = await Promise.all([
-		collectContextFiles(cwd),
-		collectSkills(cwd, settings),
+		hasPromptContext ? Promise.resolve<string[]>([]) : collectContextFiles(cwd),
+		hasPromptSkills ? Promise.resolve<SkillEntry[]>([]) : collectSkills(cwd, settings),
 		collectExtensions(cwd, settings),
 	]);
 
-	const context = promptOptions?.contextFiles?.length
-		? promptOptions.contextFiles.map((file) => file.path)
+	const context = hasPromptContext
+		? promptContext.map((file) => file.path)
 		: scannedContext;
 
-	const skills = promptOptions?.skills?.length
-		? promptOptions.skills
+	const skills = hasPromptSkills
+		? promptSkills
 				.map((skill) => ({
 					name: skill.name,
 					file: skill.filePath,
@@ -821,6 +893,75 @@ class StartupHeader extends CachedView {
  * 按 cwd 缓存，`/reload` 时清空（那时可能装了新技能/扩展）。
  */
 const dataCache = new Map<string, StartupData>();
+/** 正在扫描中的 Promise：启动页与信息面板同时打开时只扫一次。 */
+const dataPromiseCache = new Map<string, Promise<StartupData>>();
+
+/**
+ * 缓存感知的启动页数据：命中就用缓存，否则扫一次并回填（面板的「加载」区也走这里）。
+ * `force` 用于面板按 `r` 时真正重扫（否则 dataCache 会一直返回旧技能/扩展清单）。
+ */
+async function getStartupData(
+	cwd: string,
+	ctx?: ExtensionContext,
+	force = false,
+): Promise<StartupData> {
+	if (!force) {
+		const cached = dataCache.get(cwd);
+		if (cached) return cached;
+		const pending = dataPromiseCache.get(cwd);
+		if (pending) return pending;
+	}
+
+	const promise = collectStartupData(cwd, ctx);
+	dataPromiseCache.set(cwd, promise);
+	promise.then(
+		(data) => {
+			// 已被更新的一次扫描（例如面板按 r 的 force）取代时，不要把旧结果写回缓存。
+			if (dataPromiseCache.get(cwd) !== promise) return;
+			dataPromiseCache.delete(cwd);
+			dataCache.set(cwd, data);
+		},
+		() => {
+			if (dataPromiseCache.get(cwd) === promise) dataPromiseCache.delete(cwd);
+		},
+	);
+	return promise;
+}
+
+/** 信息面板「加载」区要的名单：当前会话已启用的技能 / 扩展 / MCP 名字。 */
+export interface SessionResources {
+	skills: string[];
+	extensions: string[];
+	mcp: string[];
+}
+
+/**
+ * 技能/扩展复用启动页那份按 cwd 的扫描缓存；MCP 每次现读两份 mcp.json——
+ * `/mcp` 的启停开关会直接写回文件，不等 /reload。`extensionMcp` 是调用方
+ * 从 `pi.getMcpServers()` 取的扩展注册名单，去重后并入。
+ */
+export async function collectSessionResources(
+	cwd: string,
+	ctx?: ExtensionContext,
+	extensionMcp: readonly string[] = [],
+	options: { force?: boolean } = {},
+): Promise<SessionResources> {
+	const [data, mcp] = await Promise.all([
+		getStartupData(cwd, ctx, options.force === true),
+		collectMcpServers(cwd),
+	]);
+	const enabledNames = (entries: ReadonlyArray<{ name: string; enabled: boolean }>): string[] =>
+		entries.filter((entry) => entry.enabled).map((entry) => entry.name);
+	const mcpNames = enabledNames(mcp);
+	for (const name of extensionMcp) {
+		if (!mcpNames.includes(name)) mcpNames.push(name);
+	}
+	return {
+		skills: enabledNames(data.skills),
+		extensions: enabledNames(data.extensions),
+		mcp: mcpNames,
+	};
+}
 
 function setupStartupHeader(pi: ExtensionAPI): void {
 	// 每次 session_start +1：扫描完成时如果会话已经换掉，就别再动 header。
@@ -828,7 +969,10 @@ function setupStartupHeader(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", (event) => {
 		// reload 会重新加载扩展，技能/扩展清单可能变了 → 丢掉缓存
-		if (event.reason === "reload") dataCache.clear();
+		if (event.reason === "reload") {
+			dataCache.clear();
+			dataPromiseCache.clear();
+		}
 	});
 
 	pi.on("session_start", (_event, ctx: ExtensionContext) => {
@@ -848,9 +992,8 @@ function setupStartupHeader(pi: ExtensionAPI): void {
 		});
 		if (cached) return;
 
-		void collectStartupData(ctx.cwd, ctx)
+		void getStartupData(ctx.cwd, ctx)
 			.then((data) => {
-				dataCache.set(ctx.cwd, data);
 				if (current !== generation || header === undefined) return;
 				header.setData(data);
 				tui?.requestRender();

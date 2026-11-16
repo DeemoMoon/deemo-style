@@ -11,7 +11,6 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 	type Component,
-	type TUI,
 } from "@earendil-works/pi-tui";
 import type {
 	ExtensionContext,
@@ -20,7 +19,6 @@ import {
 	keyHint,
 } from "@earendil-works/pi-coding-agent";
 import {
-	join,
 } from "node:path";
 
 // ---- 一、功能开关 ------------------------------------------------------------
@@ -265,7 +263,7 @@ let contextUsageCache: { key: string; value: ContextUsageLike } | undefined;
 
 export function contextUsageCached(ctx: ExtensionContext): ContextUsageLike {
 	const manager = ctx.sessionManager;
-	const key = `${manager.getSessionId()}\u0000${manager.getLeafId() ?? ""}\u0000${ctx.model?.id ?? ""}`;
+	const key = `${manager.getSessionId()}\u0000${manager.getLeafId() ?? ""}\u0000${ctx.model?.provider ?? ""}/${ctx.model?.id ?? ""}`;
 	if (contextUsageCache?.key === key) return contextUsageCache.value;
 	const value = ctx.getContextUsage();
 	contextUsageCache = { key, value };
@@ -338,7 +336,14 @@ function startTicker(): void {
 	if (tickTimer) return;
 	tickTimer = setInterval(() => {
 		const now = Date.now();
-		for (const listener of [...tickListeners.values()]) listener(now);
+		for (const listener of [...tickListeners.values()]) {
+			try {
+				listener(now);
+			} catch {
+				// 动画只是装饰：一个 listener 失败不能拖垮整个 tick，更不能变成
+				// uncaught exception 把 pi 进程带走。
+			}
+		}
 	}, ANIMATION_TICK_MS);
 	// 不阻止进程退出。
 	(tickTimer as { unref?: () => void }).unref?.();
@@ -396,9 +401,11 @@ export interface InfoMessageLike {
  */
 export function formatDuration(ms: number): string {
 	const seconds = Math.max(0, ms) / 1000;
-	if (seconds < 60) return `${seconds.toFixed(1)}s`;
+	// 先按一位小数舍入再判断 60s：59.96s 不能显示成 "60.0s"。
+	const rounded = Math.round(seconds * 10) / 10;
+	if (rounded < 60) return `${rounded.toFixed(1)}s`;
 
-	const totalSeconds = Math.floor(seconds);
+	const totalSeconds = Math.round(seconds);
 	const minutes = Math.floor(totalSeconds / 60);
 	const remainder = totalSeconds % 60;
 	if (minutes < 60) return `${minutes} m ${remainder} s`;
@@ -467,7 +474,11 @@ export function trimZero(text: string): string {
 export function formatTokens(count: number): string {
 	if (count < 1000) return String(Math.round(count));
 	if (count < 10_000) return trimZero(`${(count / 1000).toFixed(1)}k`);
-	if (count < 1_000_000) return `${Math.round(count / 1000)}k`;
+	if (count < 1_000_000) {
+		const k = Math.round(count / 1000);
+		// 999,999 不能显示成 "1000k"。
+		return k >= 1000 ? "1M" : `${k}k`;
+	}
 	if (count < 10_000_000) return trimZero(`${(count / 1_000_000).toFixed(1)}M`);
 	return `${Math.round(count / 1_000_000)}M`;
 }
@@ -613,10 +624,6 @@ export function headLinesOfTexts(texts: readonly string[], maxLines: number): Pr
 	return { head, total };
 }
 
-export function str(value: unknown): string {
-	return typeof value === "string" ? value : "";
-}
-
 /** 去掉 UTF-8 BOM（readFile 不剥；JSON.parse 与 diff 都容不下 BOM）。 */
 export function stripBom(text: string): string {
 	return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
@@ -655,26 +662,6 @@ export function shortenTail(text: string, maxWidth: number): string {
 export const ASCII_ONLY = /^[\x20-\x7e]*$/;
 
 /** 单行路径摘要：放得下原样返回；放不下保留末尾几段；再放不下从左侧截断保住文件名。 */
-export function summarizePath(pathDisplay: string, maxWidth: number): string {
-	if (maxWidth <= 0) return "";
-	if (visibleWidth(pathDisplay) <= maxWidth) return pathDisplay;
-
-	const separator = pathDisplay.includes("\\") ? "\\" : "/";
-	const parts = pathDisplay.split(/[\\/]+/).filter((part) => part.length > 0);
-	if (parts.length <= 1) return shortenTail(pathDisplay, maxWidth);
-
-	let best = "";
-	for (let take = 1; take <= parts.length; take++) {
-		const tail = parts.slice(parts.length - take).join(separator);
-		const candidate = `\u2026${separator}${tail}`;
-		if (visibleWidth(candidate) > maxWidth) break;
-		best = candidate;
-	}
-	if (best) return best;
-
-	return shortenTail(pathDisplay, maxWidth);
-}
-
 /** resultOutput 的按对象缓存：同一 result（展开/收起、重复渲染）不重复清洗。 */
 export const outputCache = new WeakMap<object, string>();
 
@@ -803,7 +790,7 @@ export function formatIndentedPreview(
 	if (remaining > 0) {
 		const hint =
 			`${theme.fg("muted", `... (${remaining} more ${moreLinesNoun(remaining)}, `)}` +
-			`${keyHint("app.tools.expand", "to expand")}` +
+			`${resolveKeyHint(options.keyHint)("app.tools.expand", "to expand")}` +
 			`${theme.fg("muted", ")")}`;
 		for (const segment of wrapTextWithAnsi(hint, contentWidth)) {
 			visibleLines.push(`${nextPrefix}${segment}`);
@@ -887,32 +874,6 @@ export function newWindowSnapshot(): WindowSnapshot {
  * 取文本最后 `maxLines` 行（反向扫描，O(窗口) 而不是 O(全文)）。
  * `more` = 前面还有没显示的内容（用来放"… 上面还有内容"提示）。
  */
-export function tailLines(text: string, maxLines: number): { lines: string[]; more: boolean } {
-	if (maxLines <= 0) return { lines: [], more: text.length > 0 };
-	// 末尾的换行不算一行
-	let end = text.length;
-	while (end > 0) {
-		const ch = text[end - 1];
-		if (ch !== "\n" && ch !== "\r") break;
-		end--;
-	}
-	if (end === 0) return { lines: [], more: false };
-
-	const lines: string[] = [];
-	let cursor = end;
-	for (let i = 0; i < maxLines; i++) {
-		const newline = text.lastIndexOf("\n", cursor - 1);
-		const start = newline === -1 ? 0 : newline + 1;
-		let line = text.slice(start, cursor);
-		if (line.endsWith("\r")) line = line.slice(0, -1);
-		lines.push(line);
-		cursor = newline === -1 ? 0 : newline;
-		if (newline === -1) break;
-	}
-	lines.reverse();
-	return { lines, more: cursor > 0 };
-}
-
 /** 反向取尾窗时最多回看的源行数（防止超长文本逐行回扫）。 */
 const TAIL_MAX_SOURCE_LINES = 40;
 
@@ -935,7 +896,11 @@ export function tailVisualRows(
 	let body = text;
 	let cut = false;
 	if (body.length > limit) {
-		body = body.slice(body.length - limit);
+		let start = body.length - limit;
+		// 不要从代理对的低位开始切，否则会留下孤立 surrogate。
+		const code = body.charCodeAt(start);
+		if (code >= 0xdc00 && code <= 0xdfff) start -= 1;
+		body = body.slice(start);
 		cut = true;
 	}
 

@@ -17,10 +17,8 @@ import {
 	CustomEditor,
 } from "@earendil-works/pi-coding-agent";
 import {
-	join,
 } from "node:path";
 import {
-	BLOCK_INDENT_WIDTH,
 	BOLD_OFF,
 	BOLD_ON,
 	CORAL,

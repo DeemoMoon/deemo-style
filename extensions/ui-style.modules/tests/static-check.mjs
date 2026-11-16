@@ -100,9 +100,23 @@ for (const file of files) {
 	}
 }
 
-if (problems.length > 0) {
+// 反向检查：import 了但正文里完全没用到的名字。只按“独立标识符”粗判；
+// 注释/import 已去掉，字符串里的同名词会被误认为使用（保守，不误报）。
+const unusedImports = [];
+for (const file of files) {
+	const bodyText = body(sources.get(file));
+	for (const name of importedNames(sources.get(file))) {
+		const used = new RegExp(`(?<![.\\w$])\\b${name}\\b`, "u");
+		if (!used.test(bodyText)) unusedImports.push(`${file}: import 了 ${name}，但正文未使用`);
+	}
+}
+
+if (problems.length > 0 || unusedImports.length > 0) {
 	console.error("静态检查失败：");
 	for (const problem of problems) console.error("  " + problem);
+	for (const problem of unusedImports) console.error("  " + problem);
 	process.exit(1);
 }
-console.log(`静态检查通过：${files.length} 个模块，没有「用了别的模块的导出却没 import」`);
+console.log(
+	`静态检查通过：${files.length} 个模块，没有「用了别的模块的导出却没 import」或未使用的 import`,
+);

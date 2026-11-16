@@ -6,7 +6,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -189,6 +189,26 @@ test("B11 thinking：窗口 12 行，运行中/完成后都定格尾巴", () => 
 	assert.ok(expanded.includes("第 1 步"), "展开后能看到完整思考链");
 });
 
+test("思考块：多个连续 thinking 段都必须进预览（cacheKey 不能污染快照）", () => {
+	const a = Array.from({ length: 20 }, (_, i) => `A-${i + 1}`).join("\n");
+	const b = "B-1\nB-2\nB-3";
+	const component = new piMain.AssistantMessageComponent(undefined, true);
+	component.updateContent(
+		{
+			content: [
+				{ type: "thinking", thinking: a },
+				{ type: "thinking", thinking: b },
+			],
+			timestamp: 22,
+		},
+		true,
+	);
+	const out = strip(component.render(80).join("\n"));
+	assert.ok(out.includes("A-20"), `应能看到第一段的尾部：\n${out}`);
+	assert.ok(out.includes("B-3"), `应能看到最后一段：\n${out}`);
+	assert.ok(out.includes("上面还有内容"), `内容被截断时应提示：\n${out}`);
+});
+
 test("B4 `!` 回放（构造即完成）不显示假耗时", () => {
 	const exec = new piMain.BashExecutionComponent("echo hi", { requestRender() {} }, false, 1);
 	exec.appendOutput("hi\n");
@@ -196,6 +216,20 @@ test("B4 `!` 回放（构造即完成）不显示假耗时", () => {
 	const out = strip(exec.render(80).join("\n"));
 	assert.ok(!/\b[01]ms\b/.test(out), out);
 	assert.ok(out.includes("echo hi"));
+});
+
+test("B3 `!` 命令：单条超长行在折叠/展开态都不会爆出无界可视行", () => {
+	const exec = new piMain.BashExecutionComponent("cat huge.json", { requestRender() {} }, false, 1);
+	exec.appendOutput("x".repeat(500_000));
+	exec.setComplete(0, false);
+
+	const collapsed = exec.render(80);
+	assert.ok(collapsed.length < 60, `折叠态应封顶，实际 ${collapsed.length} 行`);
+	assert.ok(collapsed.join("\n").includes("cat huge.json"));
+
+	exec.setExpanded(true);
+	const expanded = exec.render(80);
+	assert.ok(expanded.length < 1200, `展开态应封顶，实际 ${expanded.length} 行`);
 });
 
 test("B5 工具面板 partial 阶段不重复“执行中”", () => {
@@ -1137,22 +1171,23 @@ test("会话信息面板：内容 / 边框宽度 / 关闭 / 刷新", async () =>
 	for (const expected of [
 		"demo-model (demo)",
 		"medium",
-		"6.4k (6,400)", // 两条 assistant 各记一次 usage
-		"2.8k (2,840)",
-		"27k (27,240)", // input + output + cacheRead + cacheWrite 的总计
-		"68.0%",
-		"136k / 200k",
 		"重构 ui-style",
 		"~/proj/demo",
-		"￥3.60",
-		"01JC-abcdef",
 		"概览",
-		"用量",
-		"时间与位置",
+		"加载",
+		"技能",
+		"扩展",
+		"MCP",
 	]) {
 		assert.ok(out.includes(expected), `面板缺少 ${expected}：\n${out}`);
 	}
-	assert.match(out, /用时\s+\d/, "应显示累计用时");
+	// 概览：会话总时长（10:00:00 → 10:03:30 = 3 m 30 s）+ 分支规模
+	assert.ok(out.includes("3 m 30 s"), `应显示会话总时长：\n${out}`);
+	assert.ok(out.includes("4 条目"), `应显示分支条目数：\n${out}`);
+	// 用量/时间与位置已退场：不再渲染 token/上下文/费用/会话 id
+	assert.ok(!out.includes("68.0%"), out);
+	assert.ok(!out.includes("136k / 200k"), out);
+	assert.ok(!out.includes("01JC-abcdef"), out);
 
 	// 边框：所有行等宽，且就是 preferredWidth
 	const width = panel.preferredWidth();
@@ -1166,11 +1201,11 @@ test("会话信息面板：内容 / 边框宽度 / 关闭 / 刷新", async () =>
 	panel.handleInput("\x1b");
 	assert.equal(doneCalls, 1, "Esc 应关闭弹窗");
 
-	// r 刷新：换一份数据后应显示新值
-	entries[3].message.usage = { input: 1000, output: 10, cacheRead: 0, cacheWrite: 0, cost: { total: 0.5 } };
+	// r 刷新：改一条时间戳后，会话总时长应跟着变
+	entries[3].timestamp = "2026-11-15T10:05:30.000Z";
 	panel.handleInput("r");
 	const after = render().join("\n");
-	assert.ok(after.includes("$0.7500"), `刷新后费用应为 0.25+0.5=0.75：\n${after}`);
+	assert.ok(after.includes("5 m 30 s"), `刷新后总时长应为 10:00:00 → 10:05:30：\n${after}`);
 });
 
 test("会话信息面板：Tab 切焦点、←→ 改模型/思考、Enter 改名", async () => {
@@ -1344,7 +1379,7 @@ async function openPanelForTest(options = {}) {
 					requestRender() {
 						renders.count += 1;
 					},
-					terminal: { rows: options.rows ?? 34, columns: 100 },
+					terminal: { rows: options.rows ?? 34, columns: options.columns ?? 100 },
 				},
 				theme,
 				undefined,
@@ -1453,7 +1488,8 @@ test("信息面板下拉：正在生成时拒绝打开", async () => {
 test("信息面板鼠标：点行聚焦 / 点箭头切换 / 双击改名 / 点值定位光标 / 滚轮", async () => {
 	piStub.reset();
 	piStub.thinkingLevel = "medium";
-	const { panel, plain, find, mouse } = await openPanelForTest({ rows: 14 });
+	// 面板现在只有 11 行内容（概览 6 + 空行 + 加载 4），终端给小一点才能溢出可滚动
+	const { panel, plain, find, mouse } = await openPanelForTest({ rows: 9 });
 
 	// 点「思考」行 → 焦点移过去
 	mouse({ type: "click", x: 3, y: find("思考") });
@@ -1461,11 +1497,23 @@ test("信息面板鼠标：点行聚焦 / 点箭头切换 / 双击改名 / 点�
 
 	// 点「模型」行右侧的 › → 切到下一个模型
 	const modelRow = find("模型");
-	const arrowCol = plain()[modelRow].indexOf("›");
+	const modelLine = plain()[modelRow];
+	// indexOf 是字符下标，不是显示列；必须按 visibleWidth 换算（前面有 CJK）。
+	const arrowCol = visibleWidth(modelLine.slice(0, modelLine.indexOf("›")));
 	assert.ok(arrowCol > 0, "模型行应有 › 箭头");
 	mouse({ type: "click", x: arrowCol, y: modelRow });
 	await new Promise((resolve) => setTimeout(resolve, 10));
 	assert.deepEqual(piStub.calls.filter((c) => c[0] === "model"), [["model", "model-b"]]);
+
+	// 点「‹」应向左切回 model-a（同一套坐标换算，方向相反）
+	const modelLine2 = plain()[find("模型")];
+	const leftArrowCol = visibleWidth(modelLine2.slice(0, modelLine2.indexOf("‹")));
+	mouse({ type: "click", x: leftArrowCol, y: modelRow });
+	await new Promise((resolve) => setTimeout(resolve, 10));
+	assert.deepEqual(piStub.calls.filter((c) => c[0] === "model"), [
+		["model", "model-b"],
+		["model", "model-a"],
+	]);
 
 	// 双击「会话」行 → 改名（第一次输入整体替换）
 	const nameRow = find("会话  会话名");
@@ -1477,8 +1525,9 @@ test("信息面板鼠标：点行聚焦 / 点箭头切换 / 双击改名 / 点�
 	await new Promise((resolve) => setTimeout(resolve, 10));
 	assert.deepEqual(piStub.calls.filter((c) => c[0] === "name"), [["name", "新名"]]);
 
-	// 单击名称值中间 → 光标落在那一位
-	const valueCol = plain()[nameRow].indexOf("会话名");
+	// 单击名称值中间 → 光标落在那一位（用显示列，不是字符下标）
+	const nameLine = plain()[nameRow];
+	const valueCol = visibleWidth(nameLine.slice(0, nameLine.indexOf("会话名")));
 	mouse({ type: "click", x: valueCol + 2, y: nameRow });
 	panel.handleInput("X");
 	// 光标（▏）会画在插入点后面，比较时去掉
@@ -1489,6 +1538,13 @@ test("信息面板鼠标：点行聚焦 / 点箭头切换 / 双击改名 / 点�
 	const before = plain()[1];
 	mouse({ type: "wheel", x: 5, y: 5, wheelDelta: 3 });
 	assert.notEqual(plain()[1], before, "滚轮应滚动内容");
+
+	// 点标题栏/底边框不能被当成内容行（滚动后 top > 0 时尤其容易误命中）
+	const focusLine = plain()[find("▸")];
+	mouse({ type: "click", x: 30, y: 0 });
+	assert.equal(plain()[find("▸")], focusLine, "点标题栏不应改变焦点/打开下拉");
+	mouse({ type: "click", x: 30, y: plain().length - 1 });
+	assert.equal(plain()[find("▸")], focusLine, "点底边框不应改变焦点/打开下拉");
 });
 
 test("信息面板鼠标：点下拉项直接选中", async () => {
@@ -1503,6 +1559,27 @@ test("信息面板鼠标：点下拉项直接选中", async () => {
 	await new Promise((resolve) => setTimeout(resolve, 10));
 	assert.deepEqual(piStub.calls.filter((c) => c[0] === "model"), [["model", "model-c"]]);
 	assert.ok(!plain().some((line) => line.includes("→ model")), "点选后下拉应收起");
+});
+
+test("信息面板：窄终端下不产生超宽行", async () => {
+	const { panel } = await openPanelForTest({ columns: 20, rows: 20 });
+	const lines = panel.render(18); // 20 列终端，margin 1 后的 overlay 宽度
+	assert.ok(lines.length > 0);
+	for (const line of lines) {
+		assert.ok(visibleWidth(line) <= 18, `窄终端出现了超宽行：${visibleWidth(line)} > 18`);
+	}
+});
+
+test("信息面板下拉：滚轮滚动下拉选中项，而不是外层面板", async () => {
+	piStub.reset();
+	const { panel, plain, find, mouse } = await openPanelForTest();
+	panel.handleInput("\t");
+	panel.handleInput("\r");
+	const row = find("→ model-a");
+	assert.ok(row > 0, plain().join("\n"));
+	mouse({ type: "wheel", x: 12, y: row, wheelDelta: 1 });
+	const after = plain().join("\n");
+	assert.ok(after.includes("→ model-b"), `滚轮应移动下拉选中项：\n${after}`);
 });
 
 test("信息面板：←→ 快切模型时面板宽度/高度保持稳定（不跳）", async () => {
@@ -1570,6 +1647,32 @@ test("信息面板：切模型过程中不打断底边框（不闪烁/无中间�
 	const after = plain().join("\n");
 	assert.ok(after.includes("已切换到 model-b"), after);
 	assert.ok(!after.includes("…"), "底边框不应出现占位省略号");
+});
+
+test("启动资源：promptOptions 空数组是权威结果；force 会重扫技能", async () => {
+	const startup = await jiti.import(fileURLToPath(new URL("../startup.ts", import.meta.url)));
+	const dir = mkdtempSync(join(tmpdir(), "ui-style-res-"));
+	mkdirSync(join(dir, ".agents", "skills", "foo"), { recursive: true });
+	writeFileSync(join(dir, ".agents", "skills", "foo", "SKILL.md"), "# foo\n");
+	mkdirSync(join(dir, ".agents", "skills", "bar"), { recursive: true });
+	writeFileSync(join(dir, ".agents", "skills", "bar", "SKILL.md"), "# bar\n");
+
+	// promptOptions 明确给出空 skills：不能再回退到扫描，foo/bar 都不应出现
+	const promptCtx = { getSystemPromptOptions: () => ({ contextFiles: [], skills: [] }) };
+	const empty = await startup.collectSessionResources(dir, promptCtx, [], { force: true });
+	assert.deepEqual(empty.skills, []);
+
+	// 没有 promptOptions：扫描应看到 foo + bar
+	const scanned = await startup.collectSessionResources(dir, undefined, [], { force: true });
+	assert.ok(scanned.skills.includes("foo") && scanned.skills.includes("bar"), scanned.skills.join(","));
+
+	// 新增技能后，不带 force 仍读缓存；带 force 才重扫
+	mkdirSync(join(dir, ".agents", "skills", "baz"), { recursive: true });
+	writeFileSync(join(dir, ".agents", "skills", "baz", "SKILL.md"), "# baz\n");
+	const cached = await startup.collectSessionResources(dir, undefined, []);
+	assert.ok(!cached.skills.includes("baz"), `不该读到新技能：${cached.skills.join(",")}`);
+	const forced = await startup.collectSessionResources(dir, undefined, [], { force: true });
+	assert.ok(forced.skills.includes("baz"), `force 后应读到新技能：${forced.skills.join(",")}`);
 });
 
 test("#3 edit 展开态：diff 只在 result 区出现一次（不再重复）", async () => {

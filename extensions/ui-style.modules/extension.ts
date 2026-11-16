@@ -10,7 +10,7 @@
  *   ├ editor.ts       圆角输入框 + ❯/⌘/» 输入符号 + 工作中呼吸动画
  *   ├ infobar.ts      输入框上方信息条：tokens/速度/首字延迟/耗时
  *   ├ statusline.ts   输入框下方状态栏：模型(供应商)/缓存/费用/▣□ 上下文色条
- *   ├ info-panel.ts  会话信息面板（`alt+i` / `/info`）：模型/token/缓存/费用/上下文/用时/目录
+ *   ├ info-panel.ts  会话信息面板（`alt+i`）：模型/思考/会话名可改 + 时长/目录 + 已加载技能/扩展/MCP
  *   ├ session-stats.ts 会话统计口径（状态栏与信息面板共用）
  *   ├ startup.ts      启动页：logo + 上下文/技能/扩展资源清单（异步扫描）
  *   ├ skill-banner.ts 技能调用横幅：无背景 + 预览样式（原型补丁）

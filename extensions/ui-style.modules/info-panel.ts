@@ -1,20 +1,23 @@
 /**
- * 十四、会话信息面板（`alt+i` / `/info`）
+ * 十四、会话信息面板（`alt+i`）
  *
- * 一个带边框、自动居中的 overlay：
- *   - 上半部分是**可直接改**的三项：会话名、模型、思考强度；
- *   - 下半部分是只读汇总：上下文占用、输入/输出/总 token、缓存命中率、费用、
- *     累计用时、会话时长、消息规模、目录、会话 id。
+ * 一个带边框、自动居中的 overlay，分两段：
+ *   - 「概览」：三项**可直接改**（会话名、模型、思考强度）+ 只读的会话总时长、
+ *     分支规模与工作目录；
+ *   - 「加载」：当前会话已经加载的技能 / 扩展 / MCP 清单。
  *
  * 为什么用 overlay 而不是再加一行状态栏：状态栏每帧都要重算/重绘，只能放最常
  * 看的几个数；这些"偶尔想确认/顺便改一下"的东西更适合按需弹出。overlay 独占
  * 键盘、关掉就消失，不占常驻空间。
  *
  * 数据口径：
- *   - token / 费用 / 缓存 / 用时 → `computeSessionStats(getBranch())`（与状态栏同一份实现）；
- *   - 上下文占用 → `contextUsageCached(ctx)`（与信息条/状态栏共用缓存）；
+ *   - 时长 / 分支 → `computeSessionStats(getBranch())` 的 `wallMs`（与状态栏同一份实现）；
  *   - 模型/思考 → `ctx.model` / `pi.getThinkingLevel()`；
+ *   - 技能 / 扩展 / MCP → `collectSessionResources()`（startup.ts，与启动页共享
+ *     扫描缓存；MCP 另读用户级/项目级 mcp.json 与 `pi.getMcpServers()`）；
  *   - 打开时取一次快照，按 `r` 重新取（不做常驻刷新，避免与 pi 的帧循环打架）。
+ *     资源清单在**打开前**就 await 到手：面板宽度打开时定死（重绘纪律），
+ *     若先开再异步填、长名单会被截进按空清单算出来的窄盒子里。
  *
  * 重绘纪律（避免闪烁）：
  *   - 面板宽高在打开时就定下来，内容变化只重排、不改盒子尺寸；
@@ -47,24 +50,22 @@ import {
 	BAD_RED,
 	BOLD_OFF,
 	BOLD_ON,
-	contextUsageCached,
 	DIM_GRAY,
 	fg24,
 	formatCwd,
+	shortenPathLine,
 	formatDuration,
 	formatTokens,
 	MUTED,
 	OK_GREEN,
 	RESET_FG,
 	SKY_BLUE,
+	stripAnsi,
 	WARN_YELLOW,
 } from "./core.ts";
-import { hitRateRgb, levelRgb, renderContextBar } from "./context-bar.ts";
 import { supportedThinkingLevels, THINKING_COLORS } from "./levels.ts";
 import { computeSessionStats, type SessionStats } from "./session-stats.ts";
-
-/** pi 的 usage.cost 单位是美元；与状态栏同一汇率。 */
-const USD_TO_CNY = 7.2;
+import { collectSessionResources, type SessionResources } from "./startup.ts";
 
 /** 弹窗宽度策略：内容宽度 = 最长一行，夹在 [MIN_INNER, max] 之间。 */
 const MIN_INNER = 54; // 至少放得下底部提示（见 HINT_IDLE）
@@ -78,8 +79,6 @@ const TERMINAL_MARGIN = 4;
 const LABEL_WIDTH = 6;
 /** 同一行多格之间的间隔。 */
 const CELL_GAP = 3;
-/** 上下文色条最多格数。 */
-const BAR_CELLS_MAX = 26;
 /** 可见内容行数下限。 */
 const MIN_VIEWPORT = 5;
 /** 下拉列表最多同时显示多少项（超过就滚动）。 */
@@ -107,18 +106,10 @@ const BAR_EMPTY = "\u2591";
 const FOCUS_MARK = "\u25B8";
 /** 内容行统一左缩进一列（与焦点标记 ▸ 同宽，焦点切换时文字不跳）。 */
 const IND = " ";
+/** framePanel 的正文行前缀 “│ ” 占 2 列；鼠标坐标是整行坐标，要补上它。 */
+const ROW_PREFIX_WIDTH = 2;
 
 // ---- 纯函数（可单测） ------------------------------------------------------
-
-/** 千分位精确 token 数。 */
-export function exactTokens(count: number): string {
-	return Math.round(count).toLocaleString("en-US");
-}
-
-/** `3.2k (3,200)`。 */
-export function tokenCell(count: number): string {
-	return `${formatTokens(count)} (${exactTokens(count)})`;
-}
 
 /** 弹窗里用到的模型最小形状（避免依赖 pi-ai 的 Model 类型）。 */
 export interface ModelLike {
@@ -159,14 +150,6 @@ function padTo(line: string, width: number): string {
 	return line + " ".repeat(width - current);
 }
 
-/** 居中：左侧补一半余量（右侧由 padTo 补满）。 */
-function centerIn(line: string, width: number): string {
-	const current = visibleWidth(line);
-	if (current >= width) return truncateToWidth(line, width, "");
-	const left = Math.floor((width - current) / 2);
-	return " ".repeat(left) + line;
-}
-
 /** 一行里的值可以带 ANSI；`hint` 是不参与着色的灰色说明（如 “← → 切换”）。 */
 export interface Cell {
 	label: string;
@@ -178,7 +161,7 @@ export interface Cell {
 export interface ContentRow {
 	text: string;
 	field?: EditableField;
-	/** 该行"自然宽度"（比如上下文行尾部是拉伸的色条，不能用来量宽度）。 */
+	/** 该行自然宽度（箭头行只算到箭头为止，不能用来量整行）。 */
 	minWidth?: number;
 	/** `‹ ›` 箭头在该行里的起始列（0 基，未着色文本计算，供鼠标命中用）。 */
 	arrowsCol?: number;
@@ -194,27 +177,23 @@ export interface SessionInfoView {
 	thought: string;
 	sessionName: string;
 	cwd: string;
-	sessionId: string;
-	contextTokens: number | undefined;
-	contextWindow: number;
-	contextPercent: number | undefined;
 	stats: SessionStats;
 	entryCount: number;
-	streaming: boolean;
+	/** 当前会话已加载的技能 / 扩展 / MCP（startup.ts 的扫描口径）。 */
+	resources: SessionResources;
 	/** 可切换的模型列表（scoped 优先）。 */
 	models: ModelLike[];
-	/** 模型下标 / 思考档位下标（编辑用）。 */
+	/** 模型下标（编辑用；当前模型不在列表里时为 -1）。 */
 	modelIndex: number;
-	levelIndex: number;
 }
 
 export function collectSessionInfoView(
 	ctx: ExtensionContext,
 	thinking: string,
+	resources: SessionResources,
 	now = Date.now(),
 ): SessionInfoView {
 	const model = ctx.model as unknown as ModelLike | undefined;
-	const usage = contextUsageCached(ctx);
 	const branch = ctx.sessionManager.getBranch() as unknown as Parameters<
 		typeof computeSessionStats
 	>[0];
@@ -231,29 +210,21 @@ export function collectSessionInfoView(
 		models.push(candidate);
 	}
 	const currentKey = model ? `${model.provider}/${model.id}` : "";
-	const modelIndex = Math.max(
-		0,
-		models.findIndex((entry) => `${entry.provider}/${entry.id}` === currentKey),
+	const modelIndex = models.findIndex(
+		(entry) => `${entry.provider}/${entry.id}` === currentKey,
 	);
 
-	const levels = supportedThinkingLevels(model);
-	const levelIndex = Math.max(0, levels.indexOf(thinking));
 
 	return {
 		model,
 		thought: thinking,
 		sessionName: ctx.sessionManager.getSessionName() ?? "",
 		cwd: ctx.sessionManager.getCwd() || ctx.cwd,
-		sessionId: ctx.sessionManager.getSessionId(),
-		contextTokens: typeof usage?.tokens === "number" ? usage.tokens : undefined,
-		contextWindow: usage?.contextWindow ?? model?.contextWindow ?? 0,
-		contextPercent: typeof usage?.percent === "number" ? usage.percent : undefined,
 		stats: computeSessionStats(branch, now),
 		entryCount: branch.length,
-		streaming: !ctx.isIdle(),
+		resources,
 		models,
 		modelIndex,
-		levelIndex,
 	};
 }
 
@@ -335,14 +306,9 @@ function fieldRow(
 	return { text, arrowsCol, valueCol, minWidth: natural };
 }
 
-/** 去掉 ANSI 序列（底边框是单行纯文本）。 */
-function stripAnsiText(text: string): string {
-	return text.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
-}
-
 /** 把已经着色的值还原成纯文本（焦点行统一换成强调色，避免两种颜色打架）。 */
 function stripForRecolor(value: string): string {
-	return value.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
+	return stripAnsi(value);
 }
 
 export interface BuildOptions {
@@ -352,7 +318,6 @@ export interface BuildOptions {
 	selectAll?: boolean;
 	draft?: string;
 	cursor?: number;
-	message?: string;
 	/** 内联下拉：插在指定字段行之后（行文本已由 SelectList 渲染好）。 */
 	dropdown?: { after: EditableField; lines: string[] };
 	/** 量宽度时假装"总是有箭头"，避免切换模型后面板变窄。 */
@@ -367,47 +332,9 @@ export function buildSessionInfoRows(
 	options: BuildOptions = {},
 ): ContentRow[] {
 	const stats = view.stats;
-	const inner = Math.max(16, width);
+	const inner = Math.max(1, width);
 	const plain = (value: string) => theme.fg("text", value);
 	const focused = options.focus;
-
-	const percentText =
-		view.contextPercent === undefined ? "?" : `${view.contextPercent.toFixed(1)}%`;
-	const usedText = view.contextTokens === undefined ? "?" : formatTokens(view.contextTokens);
-	const windowText = view.contextWindow > 0 ? formatTokens(view.contextWindow) : "?";
-
-	// 上下文行：文字在左，色条右对齐。
-	const ctxLeft = `${FG_LABEL}上下文${RESET_FG}  ${fg24(levelRgb(view.contextPercent), percentText)}${RESET_FG}${plain(
-		`  ${usedText} / ${windowText}`,
-	)}`;
-	const barBudget = inner - visibleWidth(ctxLeft) - 2;
-	const barCells = Math.min(BAR_CELLS_MAX, Math.max(0, Math.floor(barBudget)));
-	const ctxLine =
-		barCells >= 6
-			? `${padTo(ctxLeft, inner - barCells)}${renderContextBar(view.contextPercent, barCells, "block")}`
-			: truncateToWidth(ctxLeft, inner, "…");
-
-	// token 行：窄了就只给缩写，不留半截括号。
-	const tokenBudget = Math.floor((inner - CELL_GAP * 2) / 3) - LABEL_WIDTH;
-	const tokenValue = (count: number) => {
-		const detailed = tokenCell(count);
-		return plain(visibleWidth(detailed) <= tokenBudget ? detailed : formatTokens(count));
-	};
-
-	const rate = stats.hasCache ? stats.cacheHitRate : undefined;
-	const cacheValue =
-		rate === undefined
-			? `${MUTED}--${RESET_FG}`
-			: `${fg24(hitRateRgb(rate), `${rate.toFixed(1)}%`)}${RESET_FG}${plain(
-					`  读 ${formatTokens(stats.cacheReadTokens)} · 写 ${formatTokens(stats.cacheWriteTokens)}`,
-				)}`;
-
-	const costDetailed = `￥${(stats.cost * USD_TO_CNY).toFixed(2)}  ($${stats.cost.toFixed(4)})`;
-	const costShort = `￥${(stats.cost * USD_TO_CNY).toFixed(2)}`;
-	const costBudget = Math.floor((inner - CELL_GAP) / 2) - LABEL_WIDTH;
-	const costValue = plain(
-		visibleWidth(costDetailed) <= costBudget ? costDetailed : costShort,
-	);
 
 	const thinkingColor = THINKING_COLORS[view.thought];
 	const thoughtValue = thinkingColor
@@ -424,9 +351,13 @@ export function buildSessionInfoRows(
 	const modelValue = plain(modelLabel(model));
 	const nameValue = view.sessionName ? plain(view.sessionName) : `${MUTED}未命名${RESET_FG}`;
 
+	// 「加载」区的值：空 → `--`；有名字就 ` · ` 连接（截断交给 cellsLine）。
+	const loadedValue = (names: readonly string[]): string =>
+		names.length === 0 ? `${MUTED}--${RESET_FG}` : plain(names.join(" · "));
+
 	const rows: ContentRow[] = [];
 
-	// ---- 概览（可改） ----
+	// ---- 概览（可改项 + 只读汇总） ----
 	// 可编辑行统一用 fieldRow：右侧带 ‹ › 点击箭头（键盘 ←→ 等价）
 	const pushField = (
 		row: { text: string; arrowsCol?: number; valueCol?: number },
@@ -485,40 +416,18 @@ export function buildSessionInfoRows(
 	rows.push({
 		text: cellsLine(
 			[
-				{
-					label: "状态",
-					value: view.streaming
-						? `${fg24(OK_GREEN, "● 生成中")}${RESET_FG}`
-						: `${MUTED}○ 空闲${RESET_FG}`,
-				},
+				{ label: "时长", value: plain(formatDuration(stats.wallMs)) },
 				{ label: "分支", value: plain(`${view.entryCount} 条目`) },
 			],
 			inner,
 		),
 	});
-	rows.push({ text: "" });
-
-	// ---- 用量 ----
-	rows.push({ text: `${IND}${DIM_GRAY}用量${RESET_FG}` });
-	rows.push({ text: ctxLine, minWidth: visibleWidth(ctxLeft) + 10 });
 	rows.push({
 		text: cellsLine(
 			[
-				{ label: "输入", value: tokenValue(stats.inputTokens) },
-				{ label: "输出", value: tokenValue(stats.outputTokens) },
-				{ label: "总计", value: tokenValue(stats.totalTokens) },
-			],
-			inner,
-		),
-	});
-	rows.push({ text: cellsLine([{ label: "缓存", value: cacheValue }], inner) });
-	rows.push({
-		text: cellsLine(
-			[
-				{ label: "费用", value: costValue },
 				{
-					label: "消息",
-					value: plain(`${stats.messageCount} 条 · ${stats.turnCount} 轮`),
+					label: "目录",
+					value: plain(shortenPathLine(formatCwd(view.cwd), Math.max(8, inner - LABEL_WIDTH))),
 				},
 			],
 			inner,
@@ -526,39 +435,13 @@ export function buildSessionInfoRows(
 	});
 	rows.push({ text: "" });
 
-	// ---- 时间与位置 ----
-	rows.push({ text: `${IND}${DIM_GRAY}时间与位置${RESET_FG}` });
-	rows.push({
-		text: cellsLine(
-			[
-				{ label: "用时", value: plain(formatDuration(stats.activeMs)) },
-				{ label: "时长", value: plain(formatDuration(stats.wallMs)) },
-			],
-			inner,
-		),
-	});
-	rows.push({
-		text: cellsLine([{ label: "目录", value: plain(shortenForPanel(formatCwd(view.cwd), inner)) }], inner),
-	});
-	rows.push({
-		text: cellsLine([{ label: "id", value: `${MUTED}${view.sessionId}${RESET_FG}` }], inner),
-	});
+	// ---- 加载（当前会话） ----
+	rows.push({ text: `${IND}${DIM_GRAY}加载${RESET_FG}` });
+	rows.push({ text: cellsLine([{ label: "技能", value: loadedValue(view.resources.skills) }], inner) });
+	rows.push({ text: cellsLine([{ label: "扩展", value: loadedValue(view.resources.extensions) }], inner) });
+	rows.push({ text: cellsLine([{ label: "MCP", value: loadedValue(view.resources.mcp) }], inner) });
 
 	return rows.map((row) => ({ ...row, text: truncateToWidth(row.text, inner, "…") }));
-}
-
-const FG_LABEL = `${MUTED}`;
-
-/** 目录在面板里再收一次（面板比整屏窄）。 */
-function shortenForPanel(path: string, width: number): string {
-	const budget = Math.max(8, width - LABEL_WIDTH);
-	if (visibleWidth(path) <= budget) return path;
-	const segments = path.split("/").filter(Boolean);
-	for (let keep = segments.length - 1; keep >= 1; keep--) {
-		const candidate = `…/${segments.slice(-keep).join("/")}`;
-		if (visibleWidth(candidate) <= budget) return candidate;
-	}
-	return truncateToWidth(path, budget, "…");
 }
 
 /** 内容行 → 带边框的完整弹窗行（宽度 = inner + FRAME_EXTRA，必然居中可算）。 */
@@ -579,8 +462,9 @@ export function framePanel(
 		rows.length > viewport
 			? `  ${top + 1}-${Math.min(rows.length, top + viewport)}/${rows.length}`
 			: "";
-	// 提示过长时先截提示，否则会把底边撑宽
-	const hintText = truncateToWidth(`${hint}${position}`, Math.max(0, total - 5), "…");
+	// 提示过长时先截提示，否则会把底边撑宽。hint 可能自带成功/失败色；
+	// position 单独用 MUTED，避免主题颜色一直延伸到右侧。
+	const hintText = truncateToWidth(`${hint}${MUTED}${position}${RESET_FG}`, Math.max(0, total - 5), "…");
 	const bottomFill = Math.max(0, total - 5 - visibleWidth(hintText));
 	const bottomLine = `${BORDER}╰─ ${MUTED}${hintText}${RESET_FG}${BORDER} ${"─".repeat(bottomFill)}╯${RESET_FG}`;
 
@@ -613,8 +497,23 @@ export function panelInnerWidth(maxRowWidth: number, terminalCols: number): numb
 const HINT_IDLE = "Enter 列表/改名 · ←→ 快切 · r 刷新 · Esc 关闭";
 const HINT_EDITING = "输入名称 · Enter 保存 · Esc 取消";
 
+/** 扫描失败 / 拿不到时的空清单。 */
+const EMPTY_RESOURCES: SessionResources = { skills: [], extensions: [], mcp: [] };
+
+/** 扩展用 `pi.registerMcpServer()` 注册的 MCP 名单（老版本 pi 没有这个 API）。 */
+function mcpServersFromApi(pi: ExtensionAPI): string[] {
+	try {
+		const servers = pi.getMcpServers?.() ?? [];
+		return servers.map((server) => server.name);
+	} catch {
+		return [];
+	}
+}
+
 class SessionInfoPanel implements Component {
 	private view: SessionInfoView;
+	/** 「加载」区清单（技能/扩展/MCP）；打开时取，r 重扫。 */
+	private resources: SessionResources;
 	private focus: EditableField = "name";
 	private editing = false;
 	/** 双击改名：第一次输入/删除就整体替换 */
@@ -653,6 +552,7 @@ class SessionInfoPanel implements Component {
 		ctx: ExtensionContext,
 		done: () => void,
 		terminalRows: number,
+		resources: SessionResources,
 	) {
 		this.theme = theme;
 		this.tui = tui;
@@ -660,7 +560,8 @@ class SessionInfoPanel implements Component {
 		this.ctx = ctx;
 		this.done = done;
 		this.terminalRows = terminalRows;
-		this.view = collectSessionInfoView(ctx, pi.getThinkingLevel());
+		this.resources = resources;
+		this.view = collectSessionInfoView(ctx, pi.getThinkingLevel(), resources);
 	}
 
 	invalidate(): void {
@@ -670,7 +571,7 @@ class SessionInfoPanel implements Component {
 	render(width: number): string[] {
 		// 宽度固定用 overlay 给的值（打开时已按内容算好）：内容变化只重排，不改盒子宽度，
 		// 否则换模型后盒子会变窄并在弹窗里左移。
-		const effective = Math.max(FRAME_EXTRA + 16, width);
+		const effective = Math.max(FRAME_EXTRA + 1, width);
 		if (this.width !== effective) {
 			this.width = effective;
 			this.rebuild();
@@ -679,11 +580,7 @@ class SessionInfoPanel implements Component {
 		this.revealFocus(viewport);
 		// 底边框文案：编辑态 > 最近一次操作结果 > 默认提示。
 		// 切换模型是异步的，这期间**不打断**当前文案（以前会闪一下 "…"）。
-		const hint = this.editing
-			? HINT_EDITING
-			: this.message
-				? stripAnsiText(this.message)
-				: HINT_IDLE;
+		const hint = this.editing ? HINT_EDITING : (this.message ?? HINT_IDLE);
 		return framePanel(this.rows, this.width - FRAME_EXTRA, "会话信息", hint, viewport, this.top);
 	}
 
@@ -719,14 +616,15 @@ class SessionInfoPanel implements Component {
 			selectAll: this.selectAll,
 			draft: this.draft,
 			cursor: this.cursor,
-			message: this.message,
 			dropdown,
 		};
 	}
 
 	/** 下拉内部宽度（两边留白 + 边框） */
 	private dropdownInner(inner: number): number {
-		return Math.max(12, inner - DROPDOWN_PAD * 2 - 2);
+		// 内容区 = inner - (左右各 DROPDOWN_PAD + 两边边框 + 两个内空格)
+		// = inner - 6；dropdownLines 的 total 也按这个值算，保证顶/中/底等宽。
+		return Math.max(1, inner - DROPDOWN_PAD * 2 - 2);
 	}
 
 	/**
@@ -738,9 +636,9 @@ class SessionInfoPanel implements Component {
 		if (!state) return [];
 		const boxInner = this.dropdownInner(inner);
 		const body = state.list.render(boxInner);
-		const total = boxInner + DROPDOWN_PAD + 2;
+		const total = boxInner + DROPDOWN_PAD * 2 + 2;
 		const left = " ".repeat(DROPDOWN_PAD);
-		const topFill = Math.max(0, total - 3);
+		const topFill = Math.max(0, total - 4);
 		const lines: string[] = [`${BORDER}${left}╭${"─".repeat(topFill)}╮${RESET_FG}`];
 		for (const line of body) {
 			lines.push(
@@ -757,7 +655,7 @@ class SessionInfoPanel implements Component {
 	}
 
 	private rebuild(): void {
-		const inner = Math.max(16, this.width - FRAME_EXTRA);
+		const inner = Math.max(1, this.width - FRAME_EXTRA);
 		this.rows = buildSessionInfoRows(this.view, this.theme, inner, this.buildOptions(inner));
 		this.hits = this.rows.map((row) => ({
 			field: row.field,
@@ -786,7 +684,12 @@ class SessionInfoPanel implements Component {
 
 	handleInput(data: string): void {
 		if (isKeyRelease(data)) return;
-		if (this.busy) return;
+		// 切换模型期间输入被 busy 挡住；但 Esc/q 仍应能关闭面板，不能让用户被困住。
+		// 注意不能放在 dropdown 之前处理，否则 Esc 会关掉整个面板而不是先收起下拉。
+		if (this.busy) {
+			if (matchesKey(data, "escape") || data === "q" || data === "Q") this.done();
+			return;
+		}
 
 		// 下拉打开时，按键先交给 SelectList（↑↓/PgUp/PgDn/Enter/Esc 它自己处理）
 		if (this.dropdown) {
@@ -833,7 +736,9 @@ class SessionInfoPanel implements Component {
 			return;
 		}
 		if (data === "r" || data === "R") {
+			// 同步快照（时长/分支/会话名…）立即生效；资源清单重扫是异步的，回来再补一次
 			this.refresh();
+			void this.refreshResources();
 			return;
 		}
 	}
@@ -1028,18 +933,17 @@ class SessionInfoPanel implements Component {
 	// ---- 鼠标 ---------------------------------------------------------------
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-		// 滚轮：滚动内容（下拉列表内部优先自己处理）
-		if (event.type === "wheel") {
+		const viewport = panelViewport(this.terminalRows, this.rows.length);
+		const scrollPanel = (): TuiMouseEventResult => {
 			// wheelDelta 正值 = 向下滚（与 pi 的约定一致：负值向上）
 			const delta = event.wheelDelta ?? 0;
-			const viewport = panelViewport(this.terminalRows, this.rows.length);
 			const before = this.top;
 			this.top = clampScroll(this.top + delta, this.rows.length, viewport);
 			this.requestRender();
 			return { handled: true, render: this.top !== before };
-		}
+		};
 
-		// 下拉区域：把坐标换算成 SelectList 的局部坐标后转给它
+		// 下拉区域优先：滚动/点击都先转给 SelectList，滚轮才不会滚到外层面板。
 		if (this.dropdown && this.dropdownRange) {
 			const dropdownTop = this.dropdownRange.start - this.top + 1; // +1 = 顶边框
 			const dropdownHeight = this.dropdownRange.end - this.dropdownRange.start;
@@ -1058,6 +962,8 @@ class SessionInfoPanel implements Component {
 				}
 				return { handled: true };
 			}
+			// 滚轮在下拉外面：继续滚外层面板
+			if (event.type === "wheel") return scrollPanel();
 			// 点到下拉外面：先收起，再继续按普通点击处理
 			if (event.type === "press") {
 				this.dropdown = undefined;
@@ -1067,10 +973,15 @@ class SessionInfoPanel implements Component {
 			}
 		}
 
+		if (event.type === "wheel") return scrollPanel();
 		if (event.type !== "press" && event.type !== "click") {
 			return undefined;
 		}
 		if (event.button !== "left") return undefined;
+
+		// event.y 是 overlay 整行坐标：0 是标题，1..viewport 才是内容，
+		// viewport+1 是底边框。不检查这里会把标题/底边框当成内容行。
+		if (event.y < 1 || event.y > viewport) return undefined;
 
 		const bodyRow = event.y - 1 + this.top; // -1 = 顶边框
 		const hit = this.hits[bodyRow];
@@ -1078,11 +989,13 @@ class SessionInfoPanel implements Component {
 
 		// 箭头区：‹ ›（按"被点的那一行"切换，而不是当前焦点行）
 		// 命中范围按 ARROW_ZONE 的真实可见宽度算，字形一改就自动跟着变。
-		if (hit.field && hit.arrowsCol !== undefined && event.x >= hit.arrowsCol) {
+		// hits 里的列相对 row.text，而 event.x 含 framePanel 的 "│ " 两列。
+		const arrowsCol = hit.arrowsCol === undefined ? undefined : hit.arrowsCol + ROW_PREFIX_WIDTH;
+		if (hit.field && arrowsCol !== undefined && event.x >= arrowsCol) {
 			const field = hit.field;
 			const leftWidth = visibleWidth(ARROW_LEFT);
 			const zoneWidth = visibleWidth(ARROW_ZONE);
-			const offset = event.x - hit.arrowsCol;
+			const offset = event.x - arrowsCol;
 			if (offset < zoneWidth) {
 				this.focus = field;
 				const direction = offset < leftWidth ? -1 : 1;
@@ -1094,7 +1007,7 @@ class SessionInfoPanel implements Component {
 		if (!hit.field) return { handled: false };
 
 		const field = hit.field;
-		const valueCol = hit.valueCol ?? 0;
+		const valueCol = (hit.valueCol ?? 0) + ROW_PREFIX_WIDTH;
 		const onValue = event.x >= valueCol;
 		const doubleClick = (event.clickCount ?? 1) >= 2;
 
@@ -1255,7 +1168,13 @@ class SessionInfoPanel implements Component {
 				this.requestRender();
 				return;
 			}
-			const next = (this.view.modelIndex + direction + models.length) % models.length;
+			const current = this.view.modelIndex;
+			const next =
+				current < 0
+					? direction > 0
+						? 0
+						: models.length - 1
+					: (current + direction + models.length) % models.length;
 			const target = models[next]!;
 			// 先不渲染也不清提示：等 setModel 回来一次性更新（中途重绘会闪）
 			this.busy = true;
@@ -1293,7 +1212,7 @@ class SessionInfoPanel implements Component {
 	}
 
 	private refresh(clearMessage = true): void {
-		const next = collectSessionInfoView(this.ctx, this.pi.getThinkingLevel());
+		const next = collectSessionInfoView(this.ctx, this.pi.getThinkingLevel(), this.resources);
 		if (this.modelOverride) {
 			// ctx.model 追上本地权威值 → 覆盖作废；否则继续用本地值
 			// （有的环境里 ctx.model 在同一 tick 还是旧值，会让人以为"按 → 没反应"）
@@ -1312,6 +1231,21 @@ class SessionInfoPanel implements Component {
 		this.requestRender();
 	}
 
+	/** r：重扫「加载」区清单（技能/扩展/MCP 可能中途变了）；扫描失败保持现状。 */
+	private async refreshResources(): Promise<void> {
+		try {
+			this.resources = await collectSessionResources(
+				this.view.cwd,
+				this.ctx,
+				mcpServersFromApi(this.pi),
+				{ force: true },
+			);
+		} catch {
+			// 扫描失败：保留上一次的清单
+		}
+		this.refresh();
+	}
+
 	/** 内容（焦点 / 草稿 / 提示）变了：标记脏，下一帧按新内容重排并重绘。 */
 	private requestRender(): void {
 		this.width = 0;
@@ -1324,6 +1258,17 @@ class SessionInfoPanel implements Component {
 /** 打开信息面板（命令与快捷键共用）。 */
 export async function showSessionInfoPanel(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	if (ctx.mode !== "tui") return;
+
+	// 资源清单在打开前就 await 到手：面板宽度打开时定死（重绘纪律），
+	// 若先开再异步填，长名单会被截进按空清单算出来的窄盒子里。
+	// 命中启动页的扫描缓存时这一步几乎瞬时。
+	const cwd = ctx.sessionManager.getCwd() || ctx.cwd;
+	let resources: SessionResources;
+	try {
+		resources = await collectSessionResources(cwd, ctx, mcpServersFromApi(pi));
+	} catch {
+		resources = EMPTY_RESOURCES;
+	}
 
 	// overlay 的宽度 = 内容宽度（这样才是"盒子居中"，而不是"文字贴左"）。
 	// 宽度只能从 tui 问到，所以用可变对象 + 函数式 overlayOptions 让它跟随渲染。
@@ -1338,6 +1283,7 @@ export async function showSessionInfoPanel(pi: ExtensionAPI, ctx: ExtensionConte
 				ctx,
 				() => done(undefined),
 				(tui as unknown as { terminal?: { rows?: number } }).terminal?.rows ?? 24,
+				resources,
 			);
 			size.width = Math.min(
 				MAX_INNER + FRAME_EXTRA,

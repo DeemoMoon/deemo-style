@@ -8,9 +8,6 @@
  */
 
 import {
-	MouseRegion,
-	Spacer,
-	Text,
 	truncateToWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
@@ -18,7 +15,6 @@ import {
 	AssistantMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import {
-	join,
 } from "node:path";
 import {
 	BOLD_OFF,
@@ -73,6 +69,26 @@ function recordRenderedLines(timestamp: number, lines: number): void {
 	}
 }
 
+/**
+ * 组件用于行数记录的 key。
+ *
+ * 流式组件没有构造时 timestamp（pi 传的是 undefined），但 updateContent 里的
+ * pi-ai message.timestamp 一定是数字；历史组件构造时拿到的是会话条目的 ISO
+ * 字符串，直接 Number.isFinite 会被丢掉。优先用 message 上的数字时间戳。
+ */
+function renderedLinesKey(instance: RuntimePrototype): number {
+	const fromMessage = instance.__piAssistantStyleTimestamp;
+	if (typeof fromMessage === "number" && Number.isFinite(fromMessage)) return fromMessage;
+
+	const raw = instance.timestamp as unknown;
+	if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+	if (typeof raw === "string") {
+		const parsed = Date.parse(raw);
+		if (Number.isFinite(parsed)) return parsed;
+	}
+	return 0;
+}
+
 /** 最新那条助手消息的行数（= 刚生成完的回复；没有记录时为 0）。 */
 export function lastAssistantRenderLines(): number {
 	let newest = 0;
@@ -123,7 +139,8 @@ interface RuntimeChild {
 
 interface AssistantMessageLike {
 	content?: ThinkingContentLike[];
-	timestamp?: number;
+	/** 组件构造时传入的 timestamp：流式为 undefined，历史重建时可能是 ISO 字符串。 */
+	timestamp?: string | number;
 }
 
 interface RuntimePrototype {
@@ -149,6 +166,8 @@ interface RuntimePrototype {
 	};
 	/** 渲染缓存失效计数：pi 里所有内容/流式状态变化都经过 updateContent，每次 +1。 */
 	__piAssistantStyleVersion?: number;
+	/** 最近一次 updateContent 看到的 pi-ai 消息时间戳（number，毫秒）。 */
+	__piAssistantStyleTimestamp?: number;
 	/** 变换结果缓存：pi 的 ScrollView 每帧全量重渲染，没缓存时逐行正则会反复执行。 */
 	__piAssistantStyleCache?: AssistantRenderCache;
 	__piAssistantGutterPatched?: boolean;
@@ -467,7 +486,11 @@ const THINKING_TAIL_CHARS = 8 * 1024;
 /** 取 text 的末尾 limit 个字符，并对齐到行首（丢掉半截的第一行）。 */
 function tailSlice(text: string, limit: number): string {
 	if (text.length <= limit) return text;
-	const slice = text.slice(text.length - limit);
+	let start = text.length - limit;
+	// 不要从代理对的低位开始切，否则会留下孤立 surrogate。
+	const code = text.charCodeAt(start);
+	if (code >= 0xdc00 && code <= 0xdfff) start -= 1;
+	const slice = text.slice(start);
 	const newline = slice.indexOf("\n");
 	return newline === -1 ? slice : slice.slice(newline + 1);
 }
@@ -521,10 +544,14 @@ class ThinkingPreviewView extends CachedView {
 	protected override cacheKey(): string {
 		const last = this.texts[this.texts.length - 1] ?? "";
 		const finished = this.finished;
-		// 窗口内容按节拍取快照（避免每帧重排小窗口）
-		const snapshotLast = this.snapshot(last, finished);
-		if (finished) return `${snapshotLast.length}:done`;
-		return `${snapshotLast.length}:${shimmerFrame(this.record.startedAt)}`;
+		// cacheKey() 必须是纯的：绝不能调用 snapshot()。
+		//
+		// snapshot() 会把“这一拍该显示的文本”写进 bodyText 并推进 bodySlot；
+		// cacheKey 用 last、renderLines 用 joined，一旦在 cacheKey 里写入 last，
+		// renderLines 在同一 slot 内就无法再用 joined 覆盖，运行中会只显示最后一段。
+		// 内容变化由 update() 的 invalidate() 负责；运行中的扫光由 shimmerFrame 驱动。
+		if (finished) return `${last.length}:done`;
+		return `${last.length}:${shimmerFrame(this.record.startedAt)}`;
 	}
 
 	/**
@@ -695,7 +722,7 @@ export function patchAssistantMessageStyle(): void {
 		const frame = this.isStreaming === true ? Math.floor(Date.now() / ASSISTANT_STREAM_FRAME_MS) : 0;
 		const cache = this.__piAssistantStyleCache;
 		if (isAssistantCacheValid(cache, width, version, frame)) {
-			recordRenderedLines(this.timestamp ?? 0, cache.lines.length);
+			recordRenderedLines(renderedLinesKey(this), cache.lines.length);
 			return cache.lines;
 		}
 
@@ -788,7 +815,7 @@ export function patchAssistantMessageStyle(): void {
 			const prefix = index === ghostLine ? ASSISTANT_PREFIX : " ".repeat(GUTTER);
 			return `${markers}${prefix}${content}`;
 		});
-		recordRenderedLines(this.timestamp ?? 0, result.length);
+		recordRenderedLines(renderedLinesKey(this), result.length);
 		this.__piAssistantStyleCache = {
 			schema: ASSISTANT_CACHE_SCHEMA,
 			width,
@@ -811,38 +838,43 @@ export function patchAssistantMessageStyle(): void {
 	// 都要反向换算回“未打补丁时”的位置，否则点击展开/链接会整体偏移。
 	if (originalHandleMouse) {
 		patchedHandleMouse = function (this: RuntimePrototype, event: MouseEventLike): unknown {
-			// 子组件布局宽度是 contentWidth，按它换算才能命中 Container 的 mouseLayout 缓存。
-			const innerWidth = event.width - GUTTER;
-			if (innerWidth <= 0) return originalHandleMouse.call(this, event);
+			try {
+				// 子组件布局宽度是 contentWidth，按它换算才能命中 Container 的 mouseLayout 缓存。
+				const innerWidth = event.width - GUTTER;
+				if (innerWidth <= 0) return originalHandleMouse.call(this, event);
 
-			// 布局信息必须与显示宽度、内容版本、结构版本全部对上才能用来换算。
-			const cache = this.__piAssistantStyleCache;
-			// 事件坐标可能小于缩进宽度（点在图标左侧）：钳到 0，否则会把负坐标传给子组件。
-			const approxX = Math.max(0, event.x - GUTTER);
-			if (!isAssistantCacheValid(cache, event.width, this.__piAssistantStyleVersion ?? 0)) {
-				// 没有可用的布局信息：按正文的位移近似（最常见的情况）。
+				// 布局信息必须与显示宽度、内容版本、结构版本全部对上才能用来换算。
+				const cache = this.__piAssistantStyleCache;
+				// 事件坐标可能小于缩进宽度（点在图标左侧）：钳到 0，否则会把负坐标传给子组件。
+				const approxX = Math.max(0, event.x - GUTTER);
+				if (!isAssistantCacheValid(cache, event.width, this.__piAssistantStyleVersion ?? 0)) {
+					// 没有可用的布局信息：按正文的位移近似（最常见的情况）。
+					return originalHandleMouse.call(this, {
+						...event,
+						x: approxX,
+						width: innerWidth,
+					});
+				}
+
+				const rawY = cache.rawLineOf[event.y];
+				if (rawY === undefined) {
+					return originalHandleMouse.call(this, {
+						...event,
+						x: approxX,
+						width: innerWidth,
+					});
+				}
 				return originalHandleMouse.call(this, {
 					...event,
-					x: approxX,
+					x: Math.max(0, event.x - (cache.lineShift[event.y] ?? GUTTER)),
+					y: rawY,
 					width: innerWidth,
+					height: cache.rawHeight,
 				});
+			} catch {
+				// 鼠标换算依赖 pi 的私有布局；失败就按原坐标交给 pi，不能把异常抛给输入循环。
+				return originalHandleMouse.call(this, event);
 			}
-
-			const rawY = cache.rawLineOf[event.y];
-			if (rawY === undefined) {
-				return originalHandleMouse.call(this, {
-					...event,
-					x: approxX,
-					width: innerWidth,
-				});
-			}
-			return originalHandleMouse.call(this, {
-				...event,
-				x: Math.max(0, event.x - (cache.lineShift[event.y] ?? GUTTER)),
-				y: rawY,
-				width: innerWidth,
-				height: cache.rawHeight,
-			});
 		};
 		proto.handleMouse = patchedHandleMouse;
 	}
@@ -863,6 +895,10 @@ export function patchAssistantMessageStyle(): void {
 			if (!this.__piAssistantHideThinkingUserSet) this.hideThinkingBlock = true;
 			// 渲染缓存失效信号：内容重建（包括 thinking 展开/收起、换预览）都经过这里。
 			this.__piAssistantStyleVersion = (this.__piAssistantStyleVersion ?? 0) + 1;
+			const messageTimestamp = (message as { timestamp?: unknown } | undefined)?.timestamp;
+			if (typeof messageTimestamp === "number" && Number.isFinite(messageTimestamp)) {
+				this.__piAssistantStyleTimestamp = messageTimestamp;
+			}
 			originalUpdateContent.call(this, message, isStreaming);
 			// pi 的 invalidate() 只带 message 调用（isStreaming 为 undefined），
 			// 这里兜底取组件自身的流式状态，避免流式中的思考计时被误标为已结束。
