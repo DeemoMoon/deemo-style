@@ -736,6 +736,9 @@ export function patchAssistantMessageStyle(): void {
 		const contentWidth = Math.max(1, width - GUTTER);
 		const lines = originalRender.call(this, contentWidth);
 		if (lines.length === 0) {
+			// 空消息也要记录（0 行）：否则 lastAssistantRenderLines() 会留着上一条
+			// 回复的行数，"整轮结束后跳回回复开头"就会误跳。
+			recordRenderedLines(renderedLinesKey(this), 0);
 			this.__piAssistantStyleCache = {
 				schema: ASSISTANT_CACHE_SCHEMA,
 				width,

@@ -17,14 +17,13 @@ import {
 	keyHint,
 } from "@earendil-works/pi-coding-agent";
 import {
-} from "node:path";
-import {
 	ACCENT_GREEN,
 	BAD_RED,
 	BOLD_OFF,
 	BOLD_ON,
 	DIM_GRAY,
 	execClockText,
+	liveClockText,
 	EXEC_PREVIEW_LINES,
 	FEATURES,
 	fg24,
@@ -181,7 +180,8 @@ class ExecBoxView {
 		const commandLines = animate
 			? this.borderize(borderColor, inner, this.commandSegments(inner, false))
 			: [];
-		const clock = execClockText(this.inst.__piExecClock);
+		// 运行中用 liveClockText：首帧（0~几 ms）不显示，避免闪一下 "0ms"。
+		const clock = liveClockText(this.inst.__piExecClock);
 		const loaderContent = this.inst.loader.render(inner);
 		const loaderWithClock =
 			clock === undefined || loaderContent.length === 0
@@ -265,7 +265,11 @@ class ExecBoxView {
 			: `${borderColor}${BOLD_ON}${text}${BOLD_OFF}${RESET_FG}`;
 
 		const segments = wrapTextWithAnsi(styled, inner);
-		const elapsed = includeStatus ? execClockText(this.inst.__piExecClock) : undefined;
+		const elapsed = includeStatus
+			? this.inst.status === "running"
+				? liveClockText(this.inst.__piExecClock)
+				: execClockText(this.inst.__piExecClock)
+			: undefined;
 		if (elapsed !== undefined && segments.length > 0) {
 			const lastIndex = segments.length - 1;
 			segments[lastIndex] = appendClockSuffix(segments[lastIndex] ?? "", elapsed, inner);

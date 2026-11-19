@@ -1,5 +1,52 @@
 # Changelog
 
+## [1.3.1] - 2026-11-19
+
+### 修复（复盘发现的边界 bug）
+- **并行同名 agent 的计时/尾窗互相覆盖**：`childKey` 原来是 `step ?? agent`，并行传两个
+  同名 agent（如两个 scout）时 key 相同，`state.clocks` / `state.windows` 共享——第一个
+  结束后第二个的耗时被定格、两块显示同一份滚动输出。改为**按结果数组下标**做键。
+- **折叠预览的「还有 N 行」会丢**：`headLinesOfTexts` 在 head 被 maxLines 截断时仍会
+  裁掉尾部空行（那是文本**中间**的空行）并扣减 total，实测 8 行文本第 5 行是空行时
+  `remaining` 从 4 变成 0。现在只有 head 覆盖全文时才裁。
+- **展开态长行被 `…` 永久截断**：`conclusionLines` 展开态只 `split("\n")` 不折行，长结论/
+  失败证据超过终端宽度就被 `truncateToWidth` 切掉。改为按 contentWidth 折行（失败证据同样）。
+- **单行超长输出末尾带换行时尾窗变空**：`cleanedTailText` 的切点落在末尾换行之后，
+  返回空串 → 面板明明有输出却显示「执行中...」。
+- **`git status` 的 pending 可能永久卡住**：cwd 变化时没清 `pending`，旧请求的回调又
+  早退不清，之后不再发新请求。
+- **`!` 命令运行中首帧显示 `0ms`**：抽出 `core.liveClockText()`（<16ms 且未结束不显示），
+  `bash-exec` 与子代理块共用。
+- **`assistant` 空消息未记录行数**：`renderStyled` 的 0 行分支没有 `recordRenderedLines`，
+  空回复时 `lastAssistantRenderLines()` 会留着上一条的行数，「跳回回复开头」可能误跳。
+- **信息面板下拉可能落到视口外**：`revealFocus` 只看焦点行，不看它后面的内联下拉。
+
+### 性能
+- **子代理块每帧重复全量遍历**：`childActivityText` 按 `messages` 引用 + 长度 + 末条消息
+  缓存；块渲染结果按内容签名缓存（`state.blockCache`），8 个任务时不再每帧重渲全部块。
+- **状态栏统计**：`createSessionStatsComputer()` 只累加新增条目（分支 append-only），
+  `Date.parse` 按 entry 对象 + 时间戳字符串缓存；长会话下每次刷新的成本从 O(全部条目)
+  降到 O(新增条目)。
+- 其余：`fitToWidth` 统一状态栏/信息面板的行对齐；`normalizeNewlines` 统一三处换行归一。
+
+### 清理
+- 删掉 4 个空 `import { } from "node:path"`。
+- 删掉只剩测试在用的死导出（`statusIcon` / `childHeaderPlain` / `childHeaderText` /
+  `panelTitle` / `parallelStatusText` / `ICON_THINK` / `ICON_CACHE` / `RESULT_TASK_ITEMS`），
+  并把对应测试改成验证仍在用的 `statusMark` / `conclusionHead` / `childFinalOutput` 等。
+- `PANEL_SPECS` 与 `PANEL_FACTORIES` 去重：只有 write/edit/ls 登记为特殊面板，其余自动生成。
+- `info-panel` 的模型 key 统一走 `modelKey()`；删掉 `BarStyle` 的备用字形分支；
+  删掉 `mark as never` 与几个一行包装函数；清掉孤儿注释。
+
+### 结构
+- `core.ts`（1263 行）拆成 `theme.ts`（配色/图标/对齐/扫光）、`text.ts`（格式化/ANSI/
+  折叠预览/上下文缓存/动画节拍）、`tail.ts`（CachedView / LiveTailView /
+  IndentedPreviewView）；`core.ts` 只做 `export *`，其它模块 import 路径不变。
+
+### 文档
+- 测试数同步为 124（仓库 README 与 `ui-style.modules/README.md`）。
+- `ExtensionStatusText` 类注释与实现对齐（基线存插入序、只对输出副本排序）。
+
 ## [1.3.0] - 2026-11-19
 
 ### 新功能：子代理面板（subagent 工具）

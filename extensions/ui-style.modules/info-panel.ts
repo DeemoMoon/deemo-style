@@ -52,6 +52,7 @@ import {
 	BOLD_ON,
 	DIM_GRAY,
 	fg24,
+	fitToWidth,
 	formatCwd,
 	shortenPathLine,
 	formatDuration,
@@ -141,11 +142,9 @@ export function cursorAtColumn(chars: string[], column: number): number {
 	return chars.length;
 }
 
-/** 按可见宽度补空格（行尾对齐用）。 */
+/** 按可见宽度补空格（行尾对齐用）—— 与状态栏共用 core.fitToWidth。 */
 function padTo(line: string, width: number): string {
-	const current = visibleWidth(line);
-	if (current >= width) return truncateToWidth(line, width, "");
-	return line + " ".repeat(width - current);
+	return fitToWidth(line, width);
 }
 
 /** 一行里的值可以带 ANSI；`hint` 是不参与着色的灰色说明（如 “← → 切换”）。 */
@@ -202,14 +201,14 @@ export function collectSessionInfoView(
 	const models: ModelLike[] = [];
 	for (const candidate of [...scoped, ...available]) {
 		if (!candidate) continue;
-		const key = `${candidate.provider}/${candidate.id}`;
+		const key = modelKey(candidate);
 		if (seen.has(key)) continue;
 		seen.add(key);
 		models.push(candidate);
 	}
-	const currentKey = model ? `${model.provider}/${model.id}` : "";
+	const currentKey = modelKey(model);
 	const modelIndex = models.findIndex(
-		(entry) => `${entry.provider}/${entry.id}` === currentKey,
+		(entry) => modelKey(entry) === currentKey,
 	);
 
 
@@ -280,7 +279,7 @@ function fieldRow(
 			value = `${theme.fg("text", before)}${SKY_BLUE}▏${RESET_FG}${theme.fg("text", after)}`;
 		}
 	} else if (focused) {
-		value = `${SKY_BLUE}${stripForRecolor(cell.value)}${RESET_FG}`;
+		value = `${SKY_BLUE}${stripAnsi(cell.value)}${RESET_FG}`;
 	}
 
 	// 右侧箭头区（鼠标可点；键盘 ←→ 等价）
@@ -304,10 +303,7 @@ function fieldRow(
 	return { text, arrowsCol, valueCol, minWidth: natural };
 }
 
-/** 把已经着色的值还原成纯文本（焦点行统一换成强调色，避免两种颜色打架）。 */
-function stripForRecolor(value: string): string {
-	return stripAnsi(value);
-}
+
 
 export interface BuildOptions {
 	focus?: EditableField;
@@ -671,12 +667,20 @@ class SessionInfoPanel implements Component {
 		this.dropdownRange = start >= 0 ? { start, end } : undefined;
 	}
 
-	/** 焦点行始终留在可见窗口里。 */
+	/**
+	 * 焦点行（及其内联下拉）始终留在可见窗口里。
+	 *
+	 * 只看焦点行是不够的：下拉是**跟在焦点行后面**的几行，终端行数少时
+	 * （viewport 5、下拉 3 项）整个下拉会落到视口外，用户看不到自己打开的东西。
+	 */
 	private revealFocus(viewport: number): void {
 		const index = this.rows.findIndex((row) => row.field === this.focus);
 		if (index < 0) return;
+		// 该行后面是否挂着下拉？有就把下拉末尾也算进"必须可见"的范围。
+		const range = this.dropdownRange;
+		const last = range && range.start > index ? Math.max(index, range.end - 1) : index;
 		if (index < this.top) this.top = index;
-		else if (index >= this.top + viewport) this.top = index - viewport + 1;
+		else if (last >= this.top + viewport) this.top = last - viewport + 1;
 		this.top = clampScroll(this.top, this.rows.length, viewport);
 	}
 
@@ -757,7 +761,7 @@ class SessionInfoPanel implements Component {
 				const ctxWindow = model.contextWindow ? ` · ${formatTokens(model.contextWindow)}` : "";
 				const reasoning = model.reasoning ? " · ⚡" : "";
 				return {
-					value: `${model.provider}/${model.id}`,
+					value: modelKey(model),
 					label: model.id,
 					description: `${model.provider}${ctxWindow}${reasoning}`,
 				};
@@ -797,7 +801,7 @@ class SessionInfoPanel implements Component {
 		const list = new SelectList(all, maxVisible, getSelectListTheme(), DROPDOWN_LAYOUT);
 		const currentKey =
 			field === "model"
-				? `${this.view.model?.provider}/${this.view.model?.id}`
+				? modelKey(this.view.model)
 				: this.view.thought;
 		const currentIndex = all.findIndex((item) => item.value === currentKey);
 		if (currentIndex >= 0) list.setSelectedIndex(currentIndex);
@@ -920,7 +924,7 @@ class SessionInfoPanel implements Component {
 	/** 应用下拉选择（模型 → setModel，思考 → setThinkingLevel）。 */
 	private async applyChoice(field: EditableField, value: string): Promise<void> {
 		if (field === "model") {
-			const target = this.view.models.find((model) => `${model.provider}/${model.id}` === value);
+			const target = this.view.models.find((model) => modelKey(model) === value);
 			if (!target) {
 				// 找不到目标：onSelect 里已置 busy，这里要复位
 				this.busy = false;

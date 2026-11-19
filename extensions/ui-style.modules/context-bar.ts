@@ -64,12 +64,11 @@ export function hitRateMuted(rate: number | null | undefined): Rgb {
 	return LEVEL_MUTED[hitRateLevel(rate)];
 }
 
-/** 色条字形：状态栏用 ▣□（细）；"block" 目前仅测试/备用，生产只走 "box"。 */
-export type BarStyle = "box" | "block";
+/** 色条字形：▣ 实心 / □ 空心（全部单列宽，不用 emoji）。 */
+export type BarStyle = "box";
 
 const BAR_GLYPHS: Record<BarStyle, { filled: string; empty: string }> = {
 	box: { filled: "\u25A3", empty: "\u25A1" },
-	block: { filled: "\u2588", empty: "\u2591" },
 };
 
 /** 未占用格子的颜色（统一暗灰）。 */

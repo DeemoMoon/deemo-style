@@ -117,11 +117,27 @@ export function addEntryStats(stats: SessionStats, entry: StatEntryLike): void {
 	}
 }
 
-/** 条目时间戳（ISO 字符串；取不到就当 0，不参与时间统计）。 */
+/**
+ * 条目时间戳（ISO 字符串；取不到就当 0，不参与时间统计）。
+ *
+ * `Date.parse` 是这里唯一的"贵"操作：状态栏每个 turn 会重算好几次整条分支，
+ * 同一个 entry 对象每次都被解析一遍。用 WeakMap 按对象缓存，解析只发生一次。
+ */
+const entryTimeCache = new WeakMap<StatEntryLike, { ts: string | undefined; value: number }>();
+
 function entryTime(entry: StatEntryLike): number {
-	if (typeof entry.timestamp !== "string") return 0;
-	const parsed = Date.parse(entry.timestamp);
-	return Number.isFinite(parsed) ? parsed : 0;
+	const ts = typeof entry.timestamp === "string" ? entry.timestamp : undefined;
+	const cached = entryTimeCache.get(entry);
+	// 同一对象的时间戳可能被原地改写（compaction / 测试 / 将来的会话编辑），
+	// 所以缓存要连原始时间戳一起校验，不能只按对象身份命中。
+	if (cached !== undefined && cached.ts === ts) return cached.value;
+	let value = 0;
+	if (ts !== undefined) {
+		const parsed = Date.parse(ts);
+		if (Number.isFinite(parsed)) value = parsed;
+	}
+	entryTimeCache.set(entry, { ts, value });
+	return value;
 }
 
 /**
@@ -177,6 +193,52 @@ function finalizeStats(stats: SessionStats, tracker: TurnTracker, now: number): 
 }
 
 /** 一次性算完（条目数量是会话规模，调用方按"分支锚点变了"缓存结果）。 */
+/**
+ * 有状态的统计器：分支是 append-only 的，所以可以**只累加新增的条目**。
+ *
+ * 为什么需要：状态栏在 message_end / turn_end / agent_settled 等多个事件上刷新，
+ * 而一个 turn 内 leaf id 会变化好几次。以前每次都从头扫整条分支（长会话下每条
+ * 消息都要遍历几百上千条 entry）。这里缓存"已累加到的位置"，新分支只要是同一前缀
+ * （`entries[已累加长度-1]` 还是同一个对象引用——分支数组每次新建，但 entry 对象
+ * 是共享的），就只处理尾巴。
+ *
+ * 每次返回的都是**新对象**：调用方可以随意读，不会污染缓存里的累积值。
+ */
+export function createSessionStatsComputer(): (
+	entries: readonly StatEntryLike[],
+	now?: number,
+) => SessionStats {
+	let computedLength = 0;
+	let lastEntry: StatEntryLike | undefined;
+	let base = emptyStats();
+	let tracker: TurnTracker = { first: 0, last: 0, turnStart: 0, turnEnd: 0 };
+
+	return (entries: readonly StatEntryLike[], now: number = Date.now()): SessionStats => {
+		const canExtend =
+			computedLength > 0 &&
+			entries.length >= computedLength &&
+			entries[computedLength - 1] === lastEntry;
+		if (!canExtend) {
+			base = emptyStats();
+			tracker = { first: 0, last: 0, turnStart: 0, turnEnd: 0 };
+			computedLength = 0;
+		}
+		for (let i = computedLength; i < entries.length; i++) {
+			const entry = entries[i]!;
+			addEntryStats(base, entry);
+			trackEntryTime(base, tracker, entry);
+		}
+		computedLength = entries.length;
+		lastEntry = entries.length > 0 ? entries[entries.length - 1] : undefined;
+
+		// finalize 会改 stats（补最后一轮 + 派生值），所以作用在副本上，
+		// 缓存里的 base 只保留"已完成条目"的累积。
+		const stats: SessionStats = { ...base };
+		finalizeStats(stats, tracker, now);
+		return stats;
+	};
+}
+
 export function computeSessionStats(
 	entries: readonly StatEntryLike[],
 	now: number = Date.now(),

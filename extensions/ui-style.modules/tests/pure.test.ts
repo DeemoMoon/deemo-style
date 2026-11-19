@@ -373,9 +373,7 @@ test("renderContextBar：格子数正确、档位阈值一致（状态栏与面�
 	assert.equal(renderContextBar(50, 0), "");
 	assert.equal(visibleWidth(renderContextBar(50, 10)), 10);
 	assert.equal(visibleWidth(renderContextBar(undefined, 6)), 6);
-	// 两种字形都支持：box（状态栏 ▣□）与 block（信息面板 █░）
-	const half = renderContextBar(50, 10, "block");
-	assert.equal((half.match(/\u2588/g) ?? []).length, 5);
+	// 只有一套字形（▣ 实心 / □ 空心）：生产里状态栏与信息面板共用
 	const box = renderContextBar(50, 10);
 	assert.equal((box.match(/\u25A3/g) ?? []).length, 5);
 	assert.equal(visibleWidth(box), 10);
@@ -853,4 +851,45 @@ test("stripHomePrefix：toLowerCase 会改变长度时也不能错位", async ()
 	assert.equal(stripHomePrefix(path, home, true), "/proj");
 	// 长度不足时直接不命中（不能越界切片）
 	assert.equal(stripHomePrefix("/home/\u0130", home, false), undefined);
+});
+
+test("createSessionStatsComputer：只累加新增条目，结果与全量重算一致", async () => {
+	const { createSessionStatsComputer, computeSessionStats } = await import("../session-stats.ts");
+
+	const entry = (ts, role, input, output, cacheRead = 0) => ({
+		type: "message",
+		timestamp: ts,
+		message: { role, usage: { input, output, cacheRead, cacheWrite: 0, cost: { total: 0.01 } } },
+	});
+	const entries = [
+		entry("2026-11-15T10:00:00.000Z", "user", 0, 0),
+		entry("2026-11-15T10:00:10.000Z", "assistant", 100, 20, 900),
+		entry("2026-11-15T10:00:20.000Z", "user", 0, 0),
+		entry("2026-11-15T10:00:40.000Z", "assistant", 200, 30, 1800),
+	];
+	const now = Date.parse("2026-11-15T10:00:45.000Z");
+
+	const incremental = createSessionStatsComputer();
+	// 逐步追加：每一步都必须与全量重算结果一致
+	for (let n = 1; n <= entries.length; n++) {
+		const slice = entries.slice(0, n);
+		assert.deepEqual(
+			incremental(slice, now),
+			computeSessionStats(slice, now),
+			`前 ${n} 条：增量结果应等于全量重算`,
+		);
+	}
+
+	// 分支变短 / 前缀不一致（切分支）→ 必须回退成全量重算，不能带旧累积
+	const switched = [entries[0], entry("2026-11-15T10:02:00.000Z", "assistant", 50, 5)];
+	assert.deepEqual(
+		incremental(switched, now),
+		computeSessionStats(switched, now),
+		"换成另一条分支后应等同全量重算",
+	);
+
+	// 返回的是副本：调用方修改不会污染缓存
+	const a = incremental(entries, now);
+	a.totalTokens = 0;
+	assert.deepEqual(incremental(entries, now), computeSessionStats(entries, now), "缓存不应被上一次的返回值污染");
 });

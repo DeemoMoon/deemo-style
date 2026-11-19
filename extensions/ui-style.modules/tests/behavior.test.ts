@@ -1923,89 +1923,63 @@ test("subagent 面板：单个/并行/链式都能渲染，且窄终端不超宽
 	}
 });
 
-test("subagent 面板：标题格式（单个/并行/链式）与子代理块结构", async () => {
+test("subagent 面板：状态/用量/结论等纯函数", async () => {
 	const {
-		registerSubagentPanel,
-		panelTitle,
-		statusIcon,
+		statusMark,
+		statusMarkGlyph,
+		statusMarkText,
 		cacheHitRate,
 		childThinkingLevel,
 		childModel,
 		childFooterText,
-		childHeaderText,
 		displayItems,
-		parallelStatusText,
+		childFinalOutput,
+		conclusionHead,
+		processSummary,
 	} = await import("../subagent-panel.ts");
 
-	// 状态图标
-	assert.equal(statusIcon("completed").glyph, "✓");
-	assert.equal(statusIcon("failed").glyph, "✗");
-	assert.equal(statusIcon("aborted").glyph, "✗");
-	assert.equal(statusIcon("running").glyph, "⏳");
-	assert.equal(statusIcon("pending").glyph, "⏳");
+	// 状态标记：running / ok / fail 三种 kind
+	assert.equal(statusMark([subagentChild({ status: "running" })], true).kind, "running");
+	assert.equal(statusMark([subagentChild({ status: "completed" })], false).kind, "ok");
+	assert.equal(statusMark([subagentChild({ status: "failed" })], false).kind, "fail");
+	assert.equal(statusMark([subagentChild({ status: "aborted" })], false).kind, "fail");
+	assert.equal(statusMarkGlyph({ kind: "running" }), "\uDB80\uDE11");
+	assert.match(strip(statusMarkText({ kind: "ok" })), /✓/);
+	assert.match(strip(statusMarkText({ kind: "fail" })), /✗/);
 
-	// 缓存命中率：cacheRead 800 / (1200 + 800 + 0) = 40%
+	// 缓存命中率：cacheRead 800 / (1200 + 800) = 40%；没有缓存读写 → undefined
 	assert.equal(
 		Math.round(cacheHitRate({ input: 1200, cacheRead: 800, cacheWrite: 0, output: 1, cost: 0 })),
 		40,
 	);
-	// 没有缓存读写 → undefined（显示 --，不误报 0%）
 	assert.equal(cacheHitRate({ input: 1200, cacheRead: 0, cacheWrite: 0, output: 1, cost: 0 }), undefined);
 
+	// 思考强度 / 模型 / display items / 结论 / 过程摘要
 	const child = subagentChild();
 	assert.equal(childThinkingLevel(child.messages), "high");
 	assert.equal(childModel(child), "claude-sonnet-4");
-	// details.model 缺失时退回 messages 里的 model
-	assert.equal(childModel({ ...child, model: undefined, messages: [{ ...child.messages[1], model: "gpt-x" }] }), "gpt-x");
-
-	// display items：只看 assistant（user 消息不算）
 	const items = displayItems(child.messages);
 	assert.equal(items.length, 3, `应抽到 2 text + 1 toolCall，实际 ${items.length}`);
-	assert.equal(items[0].type, "text");
 	assert.equal(items[1].type, "toolCall");
 	assert.equal(items[1].name, "read");
+	// 与 pi 的 getFinalOutput 同语义：最后一条 assistant 的**第一个** text 块
+	assert.equal(childFinalOutput(child.messages), "先看文件结构");
+	assert.equal(processSummary(child.messages), "1 次工具调用");
 
-	// 底行五段：in / out / 模型 / 思考 / 缓存
+	// 结论折叠：看头部 N 行，超出返回 remaining
+	const head = conclusionHead(["a", "b", "c", "d", "e"].join("\n"), 3);
+	assert.deepEqual(head.lines, ["a", "b", "c"]);
+	assert.equal(head.remaining, 2);
+	// 尾部空行不计入
+	assert.equal(conclusionHead("a\nb\n\n\n", 3).remaining, 0);
+
+	// 底行五段
 	const footer = strip(childFooterText(child));
 	assert.match(footer, /1\.2k/);
 	assert.match(footer, /340/);
 	assert.match(footer, /claude-sonnet-4/);
 	assert.match(footer, /high/);
 	assert.match(footer, /40\.0%/);
-
-	// 子代理块标题：图标 + ✓ + 名称 + 耗时；链式带步骤编号
-	const clock = { startedAt: Date.now() - 1500, endedAt: Date.now() };
-	const header = strip(childHeaderText(child, clock));
-	assert.ok(header.includes("\uF4BE"), "子代理块标题应带 \uF4BE");
-	assert.match(header, /✓ reviewer/);
-	assert.match(header, /1\.5s/);
-	const stepHeader = strip(childHeaderText({ ...child, step: 2 }, clock));
-	assert.match(stepHeader, /2\. \uF4BE/, `链式应带步骤编号：${stepHeader}`);
-
-	// 面板标题
-	const single = strip(panelTitle("single", [child], clock, false));
-	assert.match(single, /子代理 · reviewer/, `单个标题应带子代理名称：${single}`);
-	assert.match(single, /1\.5s/, `单个标题应带耗时：${single}`);
-	const parallel = strip(panelTitle("parallel", [child, child], clock, false));
-	assert.match(parallel, /并行 · 2 个任务/);
-	const chain = strip(panelTitle("chain", [child, child, child], clock, false));
-	assert.match(chain, /链式 · 共 3 步/);
-	// 图标码位
-	assert.ok(parallel.includes("\uEE0D"), "并行标题应使用 \uEE0D");
-	assert.ok(single.includes("\uF4BE"), "单个标题应使用 \uF4BE");
-	assert.ok(chain.includes("\uF4BE"), "链式标题应使用 \uF4BE");
-
-	// 并行状态行
-	assert.match(parallelStatusText([child, child]), /2\/2 完成/);
-	assert.match(
-		parallelStatusText([
-			child,
-			subagentChild({ status: "running" }),
-			subagentChild({ status: "pending" }),
-			subagentChild({ status: "failed" }),
-		]),
-		/2\/4 完成, 1 运行, 1 待处理, 1 失败/,
-	);
 });
 
 test("subagent 面板 renderCall：并行按子代理逐个显示（标题带 agent 名与耗时）", async () => {
@@ -2898,4 +2872,104 @@ test("subagent 面板：任务区不显示空行（压掉段落分隔，块不�
 	assert.ok(joined.includes("审查这份统计"), "首段应在");
 	assert.ok(joined.includes("差异主要来自视图层"), "中间段应在");
 	assert.ok(joined.includes("用2行给结论"), "末段应在");
+});
+
+test("subagent 面板：并行同名 agent 的计时/尾窗不互相覆盖（按数组下标区分）", async () => {
+	const { registerSubagentPanel, AgentBlockView } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	// 两个同名 agent，一个已完成（3s）、一个还在跑
+	const a = subagentChild({ agent: "scout", status: "completed", messages: [{ role: "assistant", content: [{ type: "text", text: "A 的结论" }] }] });
+	const b = subagentChild({ agent: "scout", status: "running", messages: [{ role: "assistant", content: [{ type: "text", text: "B 正在跑" }] }] });
+	const details = { content: [{ type: "text", text: "" }], details: subagentDetails("parallel", [a, b]) };
+
+	const state = {};
+	const theme2 = theme;
+	const block0 = new AgentBlockView({ child: a, state, theme: theme2, running: false, expanded: false, showTitle: true, nest: "", index: 0 });
+	const block1 = new AgentBlockView({ child: b, state, theme: theme2, running: true, expanded: false, showTitle: true, nest: "", index: 1 });
+	const l0 = block0.render(100).map(strip);
+	const l1 = block1.render(100).map(strip);
+
+	// 两份计时记录必须是独立的
+	assert.notEqual(state.clocks?.get("child:0"), state.clocks?.get("child:1"), "同名块应有各自的 BlockClock");
+	assert.notEqual(state.windows?.get("child:0"), state.windows?.get("child:1"), "同名块应有各自的尾窗快照");
+	// 内容不串：block1 不能显示 block0 的结论
+	assert.ok(l1.join("\n").includes("B 正在跑"), `运行中的块应显示自己的内容：\n${l1.join("\n")}`);
+	assert.ok(!l1.join("\n").includes("A 的结论"), `运行中的块不该显示另一个同名 agent 的结论：\n${l1.join("\n")}`);
+});
+
+test("subagent 面板：长结论/长错误在展开态按宽度折行（不被 … 切掉）", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	// 一条远超终端宽度的结论（没有换行）
+	const longConclusion = "很长的结论".repeat(40);
+	const longError = "错误信息".repeat(40);
+
+	for (const [label, child, content] of [
+		["长结论", subagentChild({ status: "completed" }), longConclusion],
+		["长错误", subagentChild({ status: "failed", errorMessage: longError }), ""],
+	]) {
+		const details = { content: [{ type: "text", text: content }], details: subagentDetails("single", [child]) };
+		for (const expanded of [false, true]) {
+			const lines = panel
+				.renderResult(details, { expanded, isPartial: false }, theme, panelContext({ isPartial: false }))
+				.render(60)
+				.map(strip);
+			const text = lines.join("");
+			// 内容必须完整：把渲染结果去掉空白后，应包含原文本整段
+			const flat = text.replace(/\s+/g, "");
+			const expect = (label === "长结论" ? longConclusion : longError).replace(/\s+/g, "");
+			assert.ok(
+				flat.includes(expect),
+				`${label}（expanded=${expanded}）应完整显示、不能丢字：\n${lines.join("\n")}`,
+			);
+			// 每行都不超宽
+			for (const line of lines) {
+				assert.ok(visibleWidth(line) <= 60, `${label} 行宽超限：${visibleWidth(line)}`);
+			}
+		}
+	}
+});
+
+test("subagent 面板：块渲染按签名缓存（同一帧数据不重复渲染），内容变化才失效", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	const results = Array.from({ length: 8 }, (_, i) =>
+		subagentChild({ agent: `a${i + 1}`, status: i < 6 ? "completed" : "failed" }),
+	);
+	const details = { content: [{ type: "text", text: "" }], details: subagentDetails("parallel", results) };
+	const state = { startedAt: Date.now() - 5000 };
+	const ctx = panelContext({ state, isPartial: true });
+
+	const first = panel.renderResult(details, { expanded: false, isPartial: true }, theme, ctx).render(100);
+	const cache = state.blockCache;
+	assert.ok(cache instanceof Map, "应建立块渲染缓存");
+	assert.equal(cache.size, 8, `8 个子代理都应有缓存条目，实际 ${cache.size}`);
+
+	// 第二次渲染（同数据）：行数一致，且缓存条目里的 lines 是同一个数组（命中，不重渲）
+	const before = cache.get("child:0").lines;
+	const second = panel.renderResult(details, { expanded: false, isPartial: true }, theme, ctx).render(100);
+	assert.equal(second.length, first.length, "同数据两次渲染行数应一致");
+	assert.equal(cache.get("child:0").lines, before, "同数据应命中缓存（同一条数组引用）");
+
+	// 内容变化 → 该块缓存失效
+	const changed = structuredClone(results);
+	changed[0].messages = [{ role: "assistant", content: [{ type: "text", text: "新内容" }] }];
+	panel
+		.renderResult(
+			{ content: [{ type: "text", text: "" }], details: subagentDetails("parallel", changed) },
+			{ expanded: false, isPartial: true },
+			theme,
+			panelContext({ state, isPartial: true }),
+		)
+		.render(100);
+	assert.notEqual(cache.get("child:0").lines, before, "内容变化后该块应重新渲染");
 });

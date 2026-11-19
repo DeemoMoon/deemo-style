@@ -44,6 +44,7 @@ import {
 	BOLD_OFF,
 	BOLD_ON,
 	CachedView,
+	cleanText,
 	formatTokens,
 	getTimerState,
 	OK_GREEN,
@@ -64,6 +65,8 @@ import type {
 } from "./core.ts";
 import {
 	cacheHitRate,
+	childActivityText,
+	childKey,
 	isChildActive,
 	statusMark,
 	totalUsage,
@@ -178,33 +181,60 @@ export function chainWindowChildren<T extends { status: string }>(
 }
 
 /**
- * 渲染窗口内的块，并**把每块补齐到同一高度**。
+ * 渲染窗口内的块，并把每块补齐到同一高度。
  *
- * 为什么必须补齐：轮播时窗口里的块是变动的（这次成功块高、下次失败块矮），
- * 总行数在 15~18 之间来回跳，pi 的 ScrollView 按总高度排版，于是每 1.5 秒整屏
- * 就往上/往下顶一次——表现就是"消息窗口自己乱跳"。
+ * 两个性能要点：
  *
- * 补齐高度取**全部子代理里的最高块**（不是当前窗口内的最高块）：后者会随相位
- * 变化，补了也还是跳；取全体最大值在数据不变时是常量，窗口总高因此恒定。
+ * 1. **块渲染结果按内容签名缓存**（存在 `state.blockCache`）。等高补齐需要知道
+ *    "全部子代理里最高的块有多高"，所以要为每块拿到行数；如果不缓存，8 个任务
+ *    就会在每一帧把 8 个块完整渲染一遍（只为显示 3 个）。签名覆盖宽度、展开态、
+ *    状态、用量与消息条数，流式中只有正在跑的那个块会失效，其余全部命中。
+ * 2. 补齐高度取**全部子代理里的最高块**（不是当前窗口内的）：后者随轮播相位变化，
+ *    补了也还是会跳。
  */
 function renderPaddedWindow(options: {
+	state: SubagentPanelState;
 	children: readonly SubagentChildLike[];
 	indices: readonly number[];
-	build: (child: SubagentChildLike) => string[];
+	build: (child: SubagentChildLike, index: number) => string[];
 	/** 是否需要等高（轮播时才需要；一次性铺全部时不必） */
 	pad: boolean;
+	/** 缓存签名里要带上的额外状态（展开态等）。 */
+	extra: string;
+	width: number;
 }): string[] {
-	const { children, indices, build, pad } = options;
+	const { state, children, indices, build, pad, extra, width } = options;
+	state.blockCache ??= new Map<string, { signature: string; lines: string[] }>();
+
+	const renderOne = (index: number): string[] => {
+		const child = children[index]!;
+		const signature = [
+			width,
+			extra,
+			child.status,
+			child.usage.input,
+			child.usage.output,
+			child.messages.length,
+			childActivityText(child.messages).length,
+		].join("\u0000");
+		const cached = state.blockCache!.get(childKey(index));
+		if (cached !== undefined && cached.signature === signature) return cached.lines;
+		const lines = build(child, index);
+		state.blockCache!.set(childKey(index), { signature, lines });
+		return lines;
+	};
+
 	if (!pad) {
 		const lines: string[] = [];
-		for (const index of indices) lines.push(...build(children[index]!));
+		for (const index of indices) lines.push(...renderOne(index));
 		return lines;
 	}
-	const built = children.map((child) => build(child));
-	const maxHeight = built.reduce((max, lines) => Math.max(max, lines.length), 0);
+
+	const rendered = children.map((_child, index) => renderOne(index));
+	const maxHeight = rendered.reduce((max, lines) => Math.max(max, lines.length), 0);
 	const lines: string[] = [];
 	for (const index of indices) {
-		const blockLines = built[index] ?? [];
+		const blockLines = rendered[index] ?? [];
 		lines.push(...blockLines);
 		for (let i = blockLines.length; i < maxHeight; i++) lines.push("");
 	}
@@ -383,12 +413,15 @@ class MultiAgentView extends CachedView {
 		const { hidden, indices } = selection;
 		lines.push(
 			...renderPaddedWindow({
+				state: this.state,
 				children: this.details.results,
 				indices,
+				extra: `run:${this.running ? 1 : 0}`,
+				width,
 				// 链式只显示 1 块、不轮播：补齐没有意义（而且会把"最高的那一步"的高度
 				// 套到当前步上，补出一大片空白）。切换步骤时的高度变化是预期内的。
 				pad: hidden > 0 && this.details.mode !== "chain",
-				build: (child) =>
+				build: (child, index) =>
 					new AgentBlockView({
 						child,
 						state: this.state,
@@ -397,6 +430,7 @@ class MultiAgentView extends CachedView {
 						expanded: false,
 						showTitle: true,
 						nest: CHILD_NEST,
+						index,
 					}).render(width),
 			}),
 		);
@@ -473,6 +507,7 @@ class SubagentResultView extends CachedView {
 			showTitle: false,
 			showTask: false,
 			resultText: this.resultText,
+			index: 0,
 		}).render(width);
 	}
 
@@ -497,10 +532,13 @@ class SubagentResultView extends CachedView {
 		const { hidden, indices } = selection;
 		lines.push(
 			...renderPaddedWindow({
+				state: this.state,
 				children: results,
 				indices,
+				extra: `done:${this.expanded ? 1 : 0}`,
+				width,
 				pad: hidden > 0 && this.details.mode !== "chain",
-				build: (child) =>
+				build: (child, index) =>
 					new AgentBlockView({
 						child,
 						state: this.state,
@@ -509,6 +547,7 @@ class SubagentResultView extends CachedView {
 						expanded: this.expanded,
 						showTitle: true,
 						nest: CHILD_NEST,
+						index,
 					}).render(width),
 			}),
 		);
@@ -548,13 +587,19 @@ function detailsOf(result: ToolResultLike): SubagentDetailsLike | undefined {
 	return candidate;
 }
 
-/** 结果文本（details 缺失时的退化路径）。 */
+/**
+ * 结果文本（`result.content`）。
+ *
+ * 用 `cleanText` 与工具面板的 `resultOutput()` 保持同一清洗口径（去 ANSI / 归一
+ * 换行 / 制表符展开）；细节是这里**不**裁剪尾部空行，结论的段落结构要留着。
+ */
 function resultText(result: ToolResultLike): string {
-	return result.content
-		.filter((part) => part.type === "text")
-		.map((part) => part.text ?? "")
-		.join("\n")
-		.trim();
+	return cleanText(
+		result.content
+			.filter((part) => part.type === "text")
+			.map((part) => part.text ?? "")
+			.join("\n"),
+	).trim();
 }
 
 /** subagent 面板（single / parallel / chain 统一入口）。 */
@@ -584,7 +629,7 @@ export function subagentPanel(): {
 			return new HeaderView(
 				() => {
 					const mark = state.mark ?? { kind: context.isPartial ? "running" : "ok" };
-					return `${UI_INDENT}${titleFromArgs(args, state, context.isPartial, mark as never)}`;
+					return `${UI_INDENT}${titleFromArgs(args, state, context.isPartial, mark)}`;
 				},
 				() => {
 					const task = (args as { task?: unknown } | undefined)?.task;
@@ -624,6 +669,7 @@ export function subagentPanel(): {
 						expanded: false,
 						showTitle: false,
 						showTask: false,
+						index: 0,
 					});
 				}
 				return new MultiAgentView(details, state, theme, true, expectedTotal);

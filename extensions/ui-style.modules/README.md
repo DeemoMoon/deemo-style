@@ -8,10 +8,14 @@
 
 | 文件 | 内容 |
 |---|---|
-| `core.ts` | **共享层**：`FEATURES` 开关、对齐系统与配色常量、块计时（BlockClock）、文本/路径/预览格式化、折叠预览算法、上下文占用缓存、`CachedView`（按宽度缓存的视图基类） |
+| `core.ts` | **共享层入口（shim）**：只做 `export *`，把下面三层重新聚合成原来的出口，其它模块的 import 路径不用改 |
+| `theme.ts` | `FEATURES` 开关、对齐系统与配色/图标常量、`⎿` 连接符、标题扫光（纯函数） |
+| `text.ts` | 耗时/用量格式化、ANSI 清洗、折叠预览算法、上下文占用缓存、统一动画节拍 |
+| `tail.ts` | `CachedView`（按宽度缓存 + 统一截宽）、`LiveTailView`（运行中的 tail -f 窗口）、`IndentedPreviewView` |
 | `panels.ts` | 工具面板（bash / codemode / read / write / edit / grep / find / ls / powershell）；收起态统一 3 行尾窗，展开态 ls 用圆角框 |
-| `subagent-data.ts` | 子代理面板的**数据层**：details 形状、图标常量、纯函数（状态图标 / 耗时 / 底行 / 标题 / display items / 状态行 / 失败证据），可单测 |
-| `subagent-panel.ts` | **子代理面板**（subagent 工具）：视图层。单个与并行/链式共用 `AgentBlockView`（块标题 → 黄色「任务」→ 滚动输出 / 结论头 4 行 → 过程摘要 → 底行），并行/链式就是「若干个缩小版单个 agent」；单个模式的标题与任务行在 `renderCall` 里（`showTitle`/`showTask` 开关避免重复） |
+| `subagent-data.ts` | 子代理面板的**数据层**：details 形状、图标常量、纯函数（状态标记 / 耗时 / 底行 / 标题 / display items / 结论折叠 / 过程摘要），可单测 |
+| `subagent-block.ts` | **子代理块渲染**：`AgentBlockView`（块标题 → 黄色「任务」→ 滚动输出 / 结论头 4 行 → 过程摘要 → 底行）与行拼装助手；单个/并行/链式共用 |
+| `subagent-panel.ts` | **子代理面板外壳**：`HeaderView`（call 区标题+任务）、进度点与状态行、窗口选择（并行 3 块轮播 / 链式只看当前步）、等高补齐、块渲染缓存、渲染器注册 |
 | `edit-preview.ts` | edit 工具的**执行中 diff 预览**：参数归一、与 pi edit 同语义的精确/fuzzy 匹配、唯一命中/重叠检查、unified diff；独立成模块便于单测 |
 | `assistant.ts` | 助手消息原型补丁（悬挂缩进 / 去背景 / 思考块折叠预览 / 鼠标坐标换算） |
 | `skill-banner.ts` | 技能调用横幅原型补丁 |

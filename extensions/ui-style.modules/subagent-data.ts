@@ -11,11 +11,11 @@
  */
 
 import {
-	clockElapsedMs,
-	formatPanelDuration,
+	liveClockText,
 	formatTokens,
 	ICON_CLOCK,
 	mixRgb,
+	normalizeNewlines,
 	RESET_FG,
 	shimmerText,
 	sgr,
@@ -35,10 +35,6 @@ import { hitRateMuted } from "./context-bar.ts";
 export const ICON_SUBAGENT = "\uF4BE";
 /** 并行模式标题图标。 */
 export const ICON_PARALLEL = "\uEE0D";
-/** 思考档位图标（底行）。 */
-export const ICON_THINK = "\uE263";
-/** 缓存命中图标（底行）。 */
-export const ICON_CACHE = "\uF52E";
 /** token 输入/输出图标（与信息条一致）。 */
 export const ICON_TOKEN_IN = "\uF176";
 export const ICON_TOKEN_OUT = "\uF175";
@@ -59,7 +55,6 @@ export const ACCENT_SUBAGENT: Rgb = [95, 135, 215];
 export const RESULT_CONCLUSION_LINES = 4;
 /** 展开态每个子代理最多显示多少个 display item（过程）。 */
 export const RESULT_SINGLE_ITEMS = 10;
-export const RESULT_TASK_ITEMS = 5;
 /** text 型 item 折叠时最多显示几行。 */
 export const RESULT_TEXT_LINES = 3;
 
@@ -126,6 +121,8 @@ export interface SubagentPanelState extends BlockClock {
 	clocks?: Map<string, BlockClock>;
 	/** 尾窗快照的存储形状由视图层填充（这里只声明键与容器的关系）。 */
 	windows?: Map<string, unknown>;
+	/** 块渲染结果缓存（面板层填充：签名 → 渲染好的行，避免每帧重渲全部块）。 */
+	blockCache?: Map<string, { signature: string; lines: string[] }>;
 }
 
 // ---- 纯函数 -----------------------------------------------------------------
@@ -135,12 +132,6 @@ export function isChildActive(child: SubagentChildLike): boolean {
 	return child.status === "running" || child.status === "pending";
 }
 
-/** 状态图标（✓ / ✗ / ⏳）与颜色。 */
-export function statusIcon(status: SubagentStatus): { glyph: string; color: Rgb } {
-	if (status === "completed") return { glyph: "✓", color: OK_GREEN };
-	if (status === "failed" || status === "aborted") return { glyph: "✗", color: BAD_RED };
-	return { glyph: "⏳", color: WARN_YELLOW };
-}
 
 /** 缓存命中率（%）；没有缓存读写时返回 undefined（显示 `--`，不误报 0%）。 */
 export function cacheHitRate(usage: SubagentUsageLike): number | undefined {
@@ -186,13 +177,32 @@ export function displayItems(messages: SubagentMessageLike[]): DisplayItem[] {
 	return items;
 }
 
+/**
+ * 执行内容文本的缓存（键 = messages 数组引用 + 长度 + 末条消息引用）。
+ *
+ * 每帧至少被问 3 次（块的 cacheKey、LiveTailView 的 cacheKey 与 renderLines），
+ * 每次都全量遍历 messages 太贵。流式时数组是新对象、或末条消息被替换，于是缓存
+ * 自然失效；历史回放时数组引用稳定，命中后几乎零成本。
+ */
+const activityCache = new WeakMap<
+	SubagentMessageLike[],
+	{ length: number; last: SubagentMessageLike | undefined; text: string }
+>();
+
 /** 执行内容文本：text 与 `→ 工具` 摘要拼成一段（滚动窗口用）。 */
 export function childActivityText(messages: SubagentMessageLike[]): string {
+	const cached = activityCache.get(messages);
+	const last = messages[messages.length - 1];
+	if (cached !== undefined && cached.length === messages.length && cached.last === last) {
+		return cached.text;
+	}
 	const parts: string[] = [];
 	for (const item of displayItems(messages)) {
 		parts.push(item.type === "text" ? item.text : `→ ${item.name}`);
 	}
-	return parts.join("\n");
+	const text = parts.join("\n");
+	activityCache.set(messages, { length: messages.length, last, text });
+	return text;
 }
 
 /**
@@ -202,10 +212,7 @@ export function childActivityText(messages: SubagentMessageLike[]): string {
  * "0ms" 再跳到真实值。结束后照常显示（3ms 这种本机工具的真实耗时有意义）。
  */
 export function elapsedText(clock: BlockClock): string | undefined {
-	const ms = clockElapsedMs(clock);
-	if (ms === undefined) return undefined;
-	if (clock.endedAt === undefined && ms < 16) return undefined;
-	return formatPanelDuration(ms);
+	return liveClockText(clock);
 }
 
 /** 耗时后缀（` · ⏱ 2.4s`），没有可信计时时为空串。 */
@@ -269,17 +276,7 @@ export function childTitle(
 	return `${sgr(ACCENT_SUBAGENT)}${BOLD_ON}${plain}${BOLD_OFF}${RESET_FG}${statusMarkText(mark)}`;
 }
 
-/** 子代理块的标题（旧的带状态图标版本，保留给调用方按需使用）。 */
-export function childHeaderPlain(child: SubagentChildLike, clock: BlockClock): string {
-	const step = child.step !== undefined ? `${child.step}. ` : "";
-	return `${step}${ICON_SUBAGENT} ${statusIcon(child.status).glyph} ${child.agent}${timerSuffix(clock)}`;
-}
 
-/** 子代理块标题的着色版（非运行态）。 */
-export function childHeaderText(child: SubagentChildLike, clock: BlockClock): string {
-	const icon = statusIcon(child.status);
-	return `${sgr(icon.color)}${BOLD_ON}${childHeaderPlain(child, clock)}${BOLD_OFF}${RESET_FG}`;
-}
 
 /** 状态标记的种类：执行中 / 成功 / 失败。 */
 export type StatusKind = "running" | "ok" | "fail";
@@ -359,15 +356,6 @@ export function panelTitlePlain(
 	return `${icon} ${label}${timerSuffix(clock)}`;
 }
 
-/** 面板标题（运行中整行扫光）。 */
-export function panelTitle(
-	mode: SubagentDetailsLike["mode"],
-	results: readonly SubagentChildLike[],
-	clock: BlockClock,
-	running: boolean,
-): string {
-	return titleWithMark(panelTitlePlain(mode, results, clock), statusMark(results, running), clock, running);
-}
 
 /** 标题 = 正文（运行中整行扫光）+ 行尾状态标记（标记不参与扫光）。 */
 function titleWithMark(plain: string, mark: StatusMark, clock: BlockClock, running: boolean): string {
@@ -410,10 +398,15 @@ export function titleFromArgs(
 }
 
 /**
- * 子代理的**结论**：它最后一条 assistant 文本（= 返回给主 agent 的内容）。
+ * 子代理的**结论**：最后一条 assistant 消息里的**第一个 text 块**。
  *
- * 单个模式的权威来源其实是 `result.content`（pi 拼好的返回值），这里保留一份
- * 从 messages 推出的版本，供并行/链式按块显示各自的结论。
+ * 语义与 pi 的 `getFinalOutput()` 完全一致（并行/链式的 `result.content` 就是用它
+ * 拼的），这样"块里显示的结论"和"主 agent 实际收到的文本"不会打架。
+ * 注意不是"最后一段 text"——一条消息里可能先有前言、再有工具调用、最后才是结论，
+ * pi 取的是前言那一块，我们跟随。
+ *
+ * 单个模式的权威来源仍是 `result.content`；这里提供从 messages 推导的版本，
+ * 供并行/链式按块显示各自的结论。
  */
 export function childFinalOutput(messages: SubagentMessageLike[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
@@ -435,7 +428,7 @@ export function conclusionHead(
 	text: string,
 	maxLines: number,
 ): { lines: string[]; remaining: number } {
-	const lines = text.replace(/\r\n?/g, "\n").split("\n");
+	const lines = normalizeNewlines(text).split("\n");
 	// 尾部空行不计入（模型常在结尾多留一个换行）。
 	let end = lines.length;
 	while (end > 0 && (lines[end - 1] ?? "").trim() === "") end--;
@@ -463,22 +456,6 @@ export function totalUsage(results: readonly SubagentChildLike[]): SubagentUsage
 	return total;
 }
 
-/** 并行/链式的状态行：`2/4 完成, 1 运行, 1 待处理`。 */
-export function parallelStatusText(results: readonly SubagentChildLike[]): string {
-	const done = results.filter((child) => child.status === "completed").length;
-	const failed = results.filter((child) => child.status === "failed" || child.status === "aborted").length;
-	const running = results.filter((child) => child.status === "running").length;
-	const pending = results.filter((child) => child.status === "pending").length;
-	const total = results.length;
-	if (running === 0 && pending === 0) {
-		return failed > 0 ? `${done}/${total} 完成, ${failed} 失败` : `${done}/${total} 完成`;
-	}
-	const parts = [`${done + failed}/${total} 完成`];
-	if (running > 0) parts.push(`${running} 运行`);
-	if (pending > 0) parts.push(`${pending} 待处理`);
-	if (failed > 0) parts.push(`${failed} 失败`);
-	return parts.join(", ");
-}
 
 /** 失败证据（错误信息 / stderr / 停止原因），没有失败时返回 undefined。 */
 export function failureText(child: SubagentChildLike): string | undefined {
@@ -487,7 +464,14 @@ export function failureText(child: SubagentChildLike): string | undefined {
 	return evidence ? evidence : "(已中止)";
 }
 
-/** 每个子代理的稳定键（链式按步骤区分，否则同名会互相覆盖计时）。 */
-export function childKey(child: SubagentChildLike): string {
-	return child.step !== undefined ? `step:${child.step}` : child.agent;
+/**
+ * 每个子代理的稳定键：**用结果数组下标**，不用 agent 名。
+ *
+ * 以前是 `step ?? agent`：并行传两个同名 agent（比如都是 scout）时 key 相同，
+ * 于是它们的 `state.clocks` / `state.windows` 互相覆盖——第一个结束后第二个的
+ * 计时被定格、两个块显示同一份滚动输出。下标在同一个 toolCall 里唯一且稳定
+ * （并行数组定长、链式只追加），所以改用它。
+ */
+export function childKey(index: number): string {
+	return `child:${index}`;
 }

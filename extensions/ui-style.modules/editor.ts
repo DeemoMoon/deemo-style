@@ -17,8 +17,6 @@ import {
 	CustomEditor,
 } from "@earendil-works/pi-coding-agent";
 import {
-} from "node:path";
-import {
 	BOLD_OFF,
 	BOLD_ON,
 	CORAL,
@@ -147,9 +145,9 @@ class RoundedEditor extends CustomEditor {
 	/**
 	 * 第一个非空白字符（`/`/`!`/其他）。
 	 *
-	 * 只在首行开头扫描，不做 `getText().trimStart()`：后者会把整段输入（包括
-	 * 粘贴进来的几十 KB）先 join 再复制一遍，而 render 每帧会问一次、
-	 * borderColor 和 prompt 又会各问一次。
+	 * 逐行扫描、找到就返回（可能跨行——用户把 `/` 敲在第二行也算命令模式），
+	 * 不做 `getText().trimStart()`：后者会把整段输入（包括粘贴进来的几十 KB）
+	 * 先 join 再复制一遍，而 render 每帧会问一次、borderColor 和 prompt 又各问一次。
 	 */
 	private leadingChar(): string {
 		const lines = (this as unknown as { state?: { lines?: string[] } }).state?.lines;

@@ -19,12 +19,11 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 import {
-} from "node:path";
-import {
 	CHROME_LEFT_PAD,
 	chromeLine,
 	contextUsageCached,
 	fg24,
+	fitToWidth,
 	formatCwd,
 	formatTokens,
 	MUTED,
@@ -33,7 +32,12 @@ import {
 	RESET_FG,
 	shortenPathLine,
 } from "./core.ts";
-import { computeSessionStats, emptyStats, type SessionStats, type StatEntryLike } from "./session-stats.ts";
+import {
+	createSessionStatsComputer,
+	emptyStats,
+	type SessionStats,
+	type StatEntryLike,
+} from "./session-stats.ts";
 // 注意：缓存命中率是"越高越好"，用 hitRateMuted（levelOf 是"越高越糟"，别混）
 import { LEVEL_MUTED, hitRateMuted, levelOf, renderContextBar } from "./context-bar.ts";
 import { thinkingText as sharedThinkingText } from "./levels.ts";
@@ -121,22 +125,16 @@ function ctxSegment(
 	return truncateToWidth(pctText, zone, "...");
 }
 
-/**
- * 把每一行补齐到终端宽度：不会因多 1 列而自动换行，
- * 数字变长变短时行宽稳定，不会出现残字或左右抖动。
- */
-function fitLine(line: string, width: number): string {
-	const current = visibleWidth(line);
-	if (current === width) return line;
-	const fitted = current > width ? truncateToWidth(line, width, "") : line;
-	const fittedWidth = visibleWidth(fitted);
-	return fittedWidth < width ? fitted + " ".repeat(width - fittedWidth) : fitted;
-}
 
 class StatusLineFooter implements Component {
 	private stats: SessionStats = emptyStats();
 	/** 统计到的分支锚点（leaf id）：变了才重算，见 refresh()。 */
 	private statsLeafId = "";
+	/**
+	 * 增量统计器：分支 append-only，所以只累加新增条目（Date.parse 也按对象缓存）。
+	 * 一个 turn 内 leaf 会变好几次，全量扫整条分支在长会话下很贵。
+	 */
+	private readonly computeStats = createSessionStatsComputer();
 
 	/**
 	 * 每帧都要用的两个 O(会话规模) 查询。pi 的 getContextUsage() 每次都会重建
@@ -175,7 +173,7 @@ class StatusLineFooter implements Component {
 		// compaction）才重算；否则连整表浅拷贝都省掉。
 		if (leafId !== this.statsLeafId) {
 			this.statsLeafId = leafId;
-			this.stats = computeSessionStats(manager.getBranch() as unknown as StatEntryLike[]);
+			this.stats = this.computeStats(manager.getBranch() as unknown as StatEntryLike[]);
 		}
 
 		this.contextUsage = contextUsageCached(this.ctx);
@@ -200,6 +198,9 @@ class StatusLineFooter implements Component {
 			this.gitStatusCwd = cwd;
 			this.gitStatusValue = undefined;
 			this.gitStatusAt = 0;
+			// 旧 cwd 的请求可能还在飞：它的回调会因为 cwd 不匹配而早退，
+			// 如果不在这里清掉 pending，就再也没有机会发新请求了（永久卡住）。
+			this.gitStatusPending = false;
 		}
 
 		const ttl = this.gitStatusFailed ? GIT_STATUS_ERROR_TTL_MS : GIT_STATUS_TTL_MS;
@@ -215,7 +216,11 @@ class StatusLineFooter implements Component {
 				(error, stdout) => {
 					// 写入前校验 cwd：git 回调回来时会话可能已切目录，
 					// 过期结果直接丢弃（也不重绘，新 cwd 会重新发起请求）。
-					if (this.gitStatusCwd !== requestCwd) return;
+					if (this.gitStatusCwd !== requestCwd) {
+						// 过期结果：丢掉，但 pending 必须复位（否则新 cwd 永远发不出请求）
+						this.gitStatusPending = false;
+						return;
+					}
 					this.gitStatusPending = false;
 					this.gitStatusAt = Date.now();
 					this.gitStatusFailed = Boolean(error);
@@ -343,7 +348,7 @@ class StatusLineFooter implements Component {
 
 		// 前两行右边缘严格对齐；整行加粗；最后统一加上左边缩进。
 		return lines.map((entry, index) => {
-			const fitted = fitLine(entry, index < 2 ? target : innerWidth);
+			const fitted = fitToWidth(entry, index < 2 ? target : innerWidth);
 			return chromeLine(fitted);
 		});
 	}

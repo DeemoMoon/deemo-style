@@ -18,6 +18,7 @@ import {
 	fg24,
 	HOME,
 	MUTED,
+	normalizeNewlines,
 	OK_GREEN,
 	RESET_FG,
 	stripBom,
@@ -79,7 +80,7 @@ export function getPreviewInput(args: unknown): PreviewInput | undefined {
 // widenReplacementsToLines 那一步。
 
 export function normalizeToLF(text: string): string {
-	return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+	return normalizeNewlines(text);
 }
 
 export function normalizeForFuzzyMatch(text: string): string {

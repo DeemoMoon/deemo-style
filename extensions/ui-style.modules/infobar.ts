@@ -16,8 +16,6 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
-} from "node:path";
-import {
 	BAD_RED,
 	CHROME_LEFT_PAD,
 	chromeLine,

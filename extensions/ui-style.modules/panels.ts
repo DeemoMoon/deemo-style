@@ -40,6 +40,7 @@ import {
 	IndentedPreviewView,
 	LiveTailView,
 	newWindowSnapshot,
+	normalizeNewlines,
 	PREVIEW_CONNECTOR_FIRST,
 	RESET_FG,
 	resultOutput,
@@ -104,7 +105,10 @@ function cleanedTailText(raw: string, limit: number): string {
 
 	let start = raw.length - limit;
 	const newline = raw.indexOf("\n", start);
-	if (newline !== -1) {
+	if (newline !== -1 && newline + 1 < raw.length) {
+		// 从下一个完整行开始，避免把 SGR 序列切一半。
+		// 注意 `newline + 1 === raw.length` 的情况：尾部只有一个换行（单行超长输出
+		// + 末尾换行），切到这里会得到空串、面板显示「执行中...」——此时保持原切点。
 		start = newline + 1;
 	} else {
 		// 单行文本：若切点落在一个 SGR 序列中间，回退到 ESC 起点。
@@ -372,7 +376,6 @@ const PANEL_SPECS: Record<string, PanelHeaderSpec> = {
 	ls: { icon: ICON_SEARCH, label: "Ls", accent: ACCENT_GREEN, showClock: false },
 };
 
-/** 从工具参数里取路径（file_path 优先，read/write/edit 都有两种键名）。 */
 /**
  * ls 结果的圆角虚线边框视图：╭╌╌╌╮ / ╎ 内容 ╎ / ╰╌╌╌╯，
  * 内容按预览行数折叠；出错时边框与文本转红。
@@ -665,7 +668,7 @@ function editPanel(spec: PanelHeaderSpec): ToolPanelRenderer {
 						state.previewDone = true;
 						if ("error" in outcome) state.previewError = outcome.error;
 						// 赋值时就归一化换行：renderCall 是高频路径，不能每帧重新 replace。
-						else state.previewDiff = outcome.diff?.replace(/\r\n?/g, "\n");
+						else state.previewDiff = outcome.diff === undefined ? undefined : normalizeNewlines(outcome.diff);
 						context.invalidate();
 					});
 				}
@@ -734,18 +737,25 @@ function editPanel(spec: PanelHeaderSpec): ToolPanelRenderer {
 	};
 }
 
-/** 工具名 → 面板工厂。新增面板只需在这里加一行（同款视觉直接用 simplePanel）。 */
-const PANEL_FACTORIES: Record<string, () => ToolPanelRenderer> = {
-	bash: () => simplePanel(PANEL_SPECS.bash!),
-	codemode: () => simplePanel(PANEL_SPECS.codemode!),
-	read: () => simplePanel(PANEL_SPECS.read!),
-	write: () => writePanel(PANEL_SPECS.write!),
-	edit: () => editPanel(PANEL_SPECS.edit!),
-	grep: () => simplePanel(PANEL_SPECS.grep!),
-	find: () => simplePanel(PANEL_SPECS.find!),
-	powershell: () => simplePanel(PANEL_SPECS.powershell!),
-	ls: () => simplePanel(PANEL_SPECS.ls!, lsView),
+/**
+ * 只有"特殊面板"才需要单独列：其余工具从 PANEL_SPECS 自动生成 simplePanel。
+ *
+ * 以前这里把 9 个工具名又抄了一遍（和 PANEL_SPECS 重复）；新增一个普通面板只要
+ * 在 PANEL_SPECS 加一行即可，只有像 write/edit/ls 这种换了视图的才来这里登记。
+ */
+const SPECIAL_PANELS: Record<string, (spec: PanelHeaderSpec) => ToolPanelRenderer> = {
+	write: writePanel,
+	edit: editPanel,
+	ls: (spec) => simplePanel(spec, lsView),
 };
+
+/** 工具名 → 面板工厂（特殊面板优先，其余按 PANEL_SPECS 自动生成）。 */
+const PANEL_FACTORIES: Record<string, () => ToolPanelRenderer> = Object.fromEntries(
+	Object.entries(PANEL_SPECS).map(([toolName, spec]) => {
+		const special = SPECIAL_PANELS[toolName];
+		return [toolName, () => (special ? special(spec) : simplePanel(spec))];
+	}),
+);
 
 /** 注册全部工具面板渲染器（纯查表，未命中的工具交还给 pi）。 */
 export function registerToolRenderers(pi: ExtensionAPI): void {

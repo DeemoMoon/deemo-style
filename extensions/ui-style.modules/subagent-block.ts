@@ -14,6 +14,7 @@ import {
 	DIM_GRAY,
 	LiveTailView,
 	newWindowSnapshot,
+	normalizeNewlines,
 	PREVIEW_CONNECTOR_FIRST,
 	PREVIEW_CONNECTOR_REST,
 	PREVIEW_CONNECTOR_WIDTH,
@@ -58,9 +59,13 @@ import type {
 /**
  * 每个子代理的计时：运行中打点、结束就地定格（与工具面板同一套 BlockClock）。
  */
-export function childClock(state: SubagentPanelState, child: SubagentChildLike): BlockClock {
+export function childClock(
+	state: SubagentPanelState,
+	child: SubagentChildLike,
+	index: number,
+): BlockClock {
 	state.clocks ??= new Map();
-	const key = childKey(child);
+	const key = childKey(index);
 	let clock = state.clocks.get(key);
 	if (!clock) {
 		clock = {};
@@ -71,9 +76,9 @@ export function childClock(state: SubagentPanelState, child: SubagentChildLike):
 }
 
 /** 每个子代理的尾窗快照（跨帧/跨组件实例复用，避免每帧往上顶）。 */
-function childWindow(state: SubagentPanelState, child: SubagentChildLike): WindowSnapshot {
+function childWindow(state: SubagentPanelState, child: SubagentChildLike, index: number): WindowSnapshot {
 	state.windows ??= new Map();
-	const key = childKey(child);
+	const key = childKey(index);
 	let window = state.windows.get(key) as WindowSnapshot | undefined;
 	if (!window) {
 		window = newWindowSnapshot();
@@ -116,7 +121,7 @@ export function taskLines(task: string | undefined, width: number, nest = ""): s
 	);
 	// 压掉空行：链式的任务里是上一步的完整输出，常带段落分隔（\n\n）。
 	// 任务区是"这一步要做什么"的连续说明，中间夹空行只会把块撑高、读起来断断续续。
-	const compact = task.replace(/\n[ \t]*\n+/g, "\n");
+	const compact = normalizeNewlines(task).replace(/\n[ \t]*\n+/g, "\n");
 	const wrapped = `${TASK_WRAP_OPEN}${compact}${TASK_WRAP_CLOSE}`;
 	const hang = " ".repeat(openWidth);
 	// 任务描述**完整显示**（不截断）：链式的任务里含 `{previous}` 被替换后的上一步
@@ -132,33 +137,41 @@ export function footerLine(child: SubagentChildLike, nest = ""): string {
 	return `${UI_INDENT}${nest}${PREVIEW_CONNECTOR_REST}${DIM_GRAY}${childFooterText(child)}${RESET_FG}`;
 }
 
-/** 结论 + 折叠提示（看头部 N 行；展开态给全文）。 */
+/**
+ * 结论 + 折叠提示（看头部 N 行；展开态给全文）。
+ *
+ * **每一行都要按 contentWidth 折行**：展开态以前直接 `split("\n")`，长行会被
+ * `CachedView` 的 `truncateToWidth(..., "…")` 切掉，子代理的长结论/失败证据
+ * 一旦超过终端宽度就永久丢内容。
+ */
 export function conclusionLines(
 	conclusion: string,
 	expanded: boolean,
 	theme: ThemeLike,
+	width: number,
 	nest = "",
 ): string[] {
 	const body = `${UI_INDENT}${nest}${PREVIEW_CONNECTOR_REST}`;
+	const contentWidth = Math.max(
+		1,
+		width - UI_INDENT_WIDTH - visibleWidth(nest) - PREVIEW_CONNECTOR_WIDTH,
+	);
+	const wrapStyled = (line: string, token: string): string[] =>
+		wrapTextWithAnsi(theme.fg(token, line), contentWidth).map((segment) => `${body}${segment}`);
 	if (!conclusion) {
 		return [`${body}${theme.fg("muted", "(无输出)")}`];
 	}
 	if (expanded) {
-		return conclusion.split("\n").map((line) => `${body}${theme.fg("text", line)}`);
+		return conclusion.split("\n").flatMap((line) => wrapStyled(line, "text"));
 	}
 	const head = conclusionHead(conclusion, RESULT_CONCLUSION_LINES);
-	const lines = head.lines.map((line) => `${body}${theme.fg("text", line)}`);
+	const lines = head.lines.flatMap((line) => wrapStyled(line, "text"));
 	if (head.remaining > 0) {
 		lines.push(
-			`${body}${theme.fg("muted", `... 还有 ${head.remaining} 行${expandedHint()}`)}`,
+			`${body}${theme.fg("muted", `... 还有 ${head.remaining} 行（Ctrl+O 展开）`)}`,
 		);
 	}
 	return lines;
-}
-
-/** 展开提示的措辞（单个块才有 Ctrl+O；块内提示保持简短）。 */
-function expandedHint(): string {
-	return "（Ctrl+O 展开）";
 }
 
 /** 过程摘要一行（`N 次工具调用`），没有调用时不产生行。 */
@@ -190,6 +203,7 @@ export class AgentBlockView extends CachedView {
 	private readonly showTask: boolean;
 	/** 正文（任务/结论/过程/底行）的额外缩进。 */
 	private readonly nest: string;
+	private readonly index: number;
 
 	/** 完成态的结论文本（单个模式来自 result.content，多块模式来自各自 messages）。 */
 	private readonly resultText: string | undefined;
@@ -206,6 +220,8 @@ export class AgentBlockView extends CachedView {
 		showTask?: boolean;
 		/** 整块再缩进的前缀（并行/链式的块嵌在外层标题下面）。 */
 		nest?: string;
+		/** 该子代理在 `details.results` 里的下标（计时/尾窗的稳定键）。 */
+		index: number;
 		/** 只有单个模式需要外部结论（多块各自从 messages 取），不传就不显示结论。 */
 		resultText?: string;
 	}) {
@@ -218,13 +234,14 @@ export class AgentBlockView extends CachedView {
 		this.showTitle = options.showTitle;
 		this.showTask = options.showTask !== false;
 		this.nest = options.nest ?? "";
+		this.index = options.index;
 
 		this.resultText = options.resultText;
 		this.tail = new LiveTailView(
 			{
 				text: () => childActivityText(this.child.messages),
 				finished: () => !this.running,
-				window: childWindow(options.state, options.child),
+				window: childWindow(options.state, options.child, options.index),
 			},
 			options.theme,
 			// 任务行已经占了 ⎿，窗口内容全部走等宽续行前缀（一层里不要两个 ⎿）。
@@ -266,7 +283,7 @@ export class AgentBlockView extends CachedView {
 
 		// 1) 标题（多块模式才有；单个模式的标题在 renderCall 里）
 		if (this.showTitle) {
-			const clock = childClock(this.state, this.child);
+			const clock = childClock(this.state, this.child, this.index);
 			lines.push(
 				`${UI_INDENT}${BLANK_CONNECTOR}${childTitle(this.child, clock, this.running)}`,
 			);
@@ -278,7 +295,13 @@ export class AgentBlockView extends CachedView {
 		// 3) 失败：给错误证据，不再显示结论
 		const failure = failureText(this.child);
 		if (failure) {
-			lines.push(`${UI_INDENT}${this.nest}${PREVIEW_CONNECTOR_REST}${theme.fg("error", failure)}`);
+			const contentWidth = Math.max(
+				1,
+				width - UI_INDENT_WIDTH - visibleWidth(this.nest) - PREVIEW_CONNECTOR_WIDTH,
+			);
+			for (const segment of wrapTextWithAnsi(theme.fg("error", failure), contentWidth)) {
+				lines.push(`${UI_INDENT}${this.nest}${PREVIEW_CONNECTOR_REST}${segment}`);
+			}
 			lines.push(footerLine(this.child, this.nest));
 			return lines;
 		}
@@ -295,7 +318,7 @@ export class AgentBlockView extends CachedView {
 		} else {
 			// 4b) 完成：结论（默认取该子代理自己的最后一条 assistant 文本）
 			const conclusion = (this.resultText ?? childFinalOutput(this.child.messages)).trim();
-			lines.push(...conclusionLines(conclusion, this.expanded, theme, this.nest));
+			lines.push(...conclusionLines(conclusion, this.expanded, theme, width, this.nest));
 			// 5) 过程：折叠态只留一行摘要；展开态铺完整工具调用列表
 			//    （text 片段已经作结论显示过，这里只取 toolCall，避免同一段文字出现两遍）。
 			if (this.expanded) {
