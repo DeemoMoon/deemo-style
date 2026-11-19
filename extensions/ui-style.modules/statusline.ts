@@ -21,10 +21,8 @@ import { execFile } from "node:child_process";
 import {
 } from "node:path";
 import {
-	BOLD_OFF,
-	BOLD_ON,
 	CHROME_LEFT_PAD,
-	CHROME_PAD,
+	chromeLine,
 	contextUsageCached,
 	fg24,
 	formatCwd,
@@ -94,7 +92,7 @@ function ctxSegment(
 	windowText: string,
 	zone: number,
 ): string | undefined {
-	const cellWidth = 1; // ▣ / □ / █ / ░ 都是单列宽
+	// ▣ / □ / █ / ░ 都是单列宽，无需 cellWidth 抽象。
 	// 百分比已知时按档位上色（降饱和柔色）；未知（"?"）保持普通文字色。
 	const known = typeof percent === "number" && Number.isFinite(percent);
 	const pctText = known
@@ -108,9 +106,10 @@ function ctxSegment(
 
 	for (const label of candidates) {
 		const barBudget = zone - visibleWidth(label) - 1;
-		if (barBudget < MIN_BAR_CELLS * cellWidth) continue;
-		const cells = Math.floor(barBudget / cellWidth);
-		const gap = 1 + (barBudget - cells * cellWidth);
+		if (barBudget < MIN_BAR_CELLS) continue;
+		// 单列宽时 cells 恒等于 barBudget：右边缘对齐靠 zone 预算本身，gap 恒为 1。
+		const cells = barBudget;
+		const gap = 1;
 		return `${label}${" ".repeat(gap)}${renderContextBar(percent, cells, "box")}`;
 	}
 
@@ -207,15 +206,25 @@ class StatusLineFooter implements Component {
 		const stale = this.gitStatusValue === undefined || now - this.gitStatusAt >= ttl;
 		if (!this.gitStatusPending && stale) {
 			this.gitStatusPending = true;
+			// 闭包捕获发起时的 cwd，回调写入前比对（见下方校验）。
+			const requestCwd = cwd;
 			execFile(
 				"git",
 				["status", "--porcelain=v1", "-b"],
 				{ cwd, encoding: "utf8", timeout: 1500, windowsHide: true },
 				(error, stdout) => {
+					// 写入前校验 cwd：git 回调回来时会话可能已切目录，
+					// 过期结果直接丢弃（也不重绘，新 cwd 会重新发起请求）。
+					if (this.gitStatusCwd !== requestCwd) return;
 					this.gitStatusPending = false;
 					this.gitStatusAt = Date.now();
 					this.gitStatusFailed = Boolean(error);
-					this.gitStatusValue = error ? null : parseGitStatus(stdout);
+					if (error) {
+						this.gitStatusValue = null;
+						// 失败时值没变，requestRender 纯属多一帧；成功才重绘。
+						return;
+					}
+					this.gitStatusValue = parseGitStatus(stdout);
 					this.tui.requestRender();
 				},
 			);
@@ -335,7 +344,7 @@ class StatusLineFooter implements Component {
 		// 前两行右边缘严格对齐；整行加粗；最后统一加上左边缩进。
 		return lines.map((entry, index) => {
 			const fitted = fitLine(entry, index < 2 ? target : innerWidth);
-			return `${CHROME_PAD}${BOLD_ON}${fitted}${BOLD_OFF}`;
+			return chromeLine(fitted);
 		});
 	}
 }

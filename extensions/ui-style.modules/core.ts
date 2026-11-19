@@ -18,8 +18,6 @@ import type {
 import {
 	keyHint,
 } from "@earendil-works/pi-coding-agent";
-import {
-} from "node:path";
 
 // ---- 一、功能开关 ------------------------------------------------------------
 
@@ -45,6 +43,8 @@ export const FEATURES = {
 	bashExecBox: true,
 	/** bash/codemode/read/write/edit/grep/find/ls/powershell 工具面板。 */
 	toolPanels: true,
+	/** subagent 工具面板（单个/并行/链式统一视觉）。 */
+	subagentPanel: true,
 	/** 整轮结束后把视口带回回复开头（长回复 + 原来在跟随时）。 */
 	jumpToReplyStart: true,
 	/** 运行中块的标题扫光（图标 + 工具名 / 思考中 / `!` 短命令）。 */
@@ -68,8 +68,13 @@ export const fg24 = (rgb: Rgb, text: string): string => `${sgr(rgb)}${text}\x1b[
 // 靠 pi 本来就有的帧（working spinner 80ms / 信息条 tick 200ms / `!` 的 loader
 // 与输出推送）带动。这和耗时数字的跳动方式完全一致（见文件头的 BlockClock 说明）。
 
-/** 扫光往返周期（毫秒）：左 → 右 → 左。 */
-const SHIMMER_PERIOD_MS = 1400;
+/**
+ * 扫光往返周期（毫秒）：左 → 右 → 左。
+ *
+ * 调慢过一次（1400 → 2800）：1.4s 一个来回在 10fps 的帧下像"闪"，慢下来才读得出
+ * "光带在移动"。这是全局旋钮，标题 / 工具面板 / `!` 命令 / 思考块共用。
+ */
+export const SHIMMER_PERIOD_MS = 2800;
 /** 高亮带宽度（字符数）：越大越柔和。 */
 const SHIMMER_BAND = 2.5;
 /** 高亮处向白色混合的最大比例（只提亮，不换色相）。 */
@@ -190,6 +195,70 @@ export const THINKING_YELLOW_RGB: Rgb = [240, 216, 130];
 export const THINKING_YELLOW = sgr(THINKING_YELLOW_RGB);
 /** pi logo 的珊瑚色（输入符号 ❯）。 */
 export const CORAL = "\x1b[38;2;228;138;122m";
+
+/** 组装「信息条 / 状态栏」那种整行：统一缩进 + 整行加粗（两处共用）。 */
+export function chromeLine(content: string): string {
+	return `${CHROME_PAD}${BOLD_ON}${content}${BOLD_OFF}`;
+}
+
+// ---- 原型补丁助手（assistant / skill-banner / bash-exec / user-message 共用） ----
+//
+// 四份「保存原方法 → 打补丁 → 所有权校验恢复」的骨架原本各抄一遍，哨兵语义
+// 还各不相同（有的 unpatch 失权路径忘清标志）。统一到这里：
+//   - patchPrototypeSlots 幂等（已持有全部槽位时直接返回，重复 patch 是 no-op）；
+//   - unpatchPrototypeSlots 只恢复"当前槽位上仍是我们的函数"的那些，且任何
+//     return 路径都会把 originals/patched 标志清干净，/reload 不会残留旧闭包。
+
+type ProtoRecord = Record<PropertyKey, unknown>;
+
+const slotKey = (prefix: string, name: string): string => `${prefix}:${name}`;
+const originalKey = (prefix: string, name: string): string => `${prefix}:original:${name}`;
+const patchedKey = (prefix: string, name: string): string => `${prefix}:patched:${name}`;
+
+export function patchPrototypeSlots<P extends ProtoRecord>(
+	proto: P,
+	prefix: string,
+	impls: Partial<Record<keyof P, (...args: never[]) => unknown>>,
+): void {
+	const record = proto as Record<string, unknown>;
+	const allOwned = Object.keys(impls).every(
+		(name) => record[slotKey(prefix, name)] === true &&
+			record[name] === record[patchedKey(prefix, name)],
+	);
+	if (allOwned) return;
+	// 先完全恢复（不重打的话新旧闭包会混在同一原型上，互相吃掉对方的状态）
+	unpatchPrototypeSlots(proto, prefix, Object.keys(impls));
+	for (const [name, impl] of Object.entries(impls)) {
+		record[originalKey(prefix, name)] = proto[name as keyof P];
+		record[name] = impl;
+		record[patchedKey(prefix, name)] = impl;
+		record[slotKey(prefix, name)] = true;
+	}
+}
+
+/** 恢复槽位（只动仍归我们所有的）；返回是否收回过至少一个槽位。 */
+export function unpatchPrototypeSlots<P extends ProtoRecord>(
+	proto: P,
+	prefix: string,
+	names: readonly (keyof P & string)[],
+): boolean {
+	const record = proto as Record<string, unknown>;
+	let restored = false;
+	for (const name of names) {
+		const patched = record[patchedKey(prefix, name)];
+		const owns = patched !== undefined && record[name] === patched;
+		if (owns) {
+			const original = record[originalKey(prefix, name)];
+			if (original === undefined) delete record[name];
+			else record[name] = original;
+			restored = true;
+		}
+		delete record[originalKey(prefix, name)];
+		delete record[patchedKey(prefix, name)];
+		delete record[slotKey(prefix, name)];
+	}
+	return restored;
+}
 
 /** Nerd Font 图标（宽度均为 1 列；图标 + 空格 = 2 列，与缩进计算配套）。 */
 export const ICON_BASH = "\uF489";
@@ -550,7 +619,7 @@ export function collapsePreviewLines(
 	style: (line: string) => string,
 ): { lines: string[]; remaining: number } {
 	const isArray = Array.isArray(source);
-	const head = isArray ? (source as readonly string[]) : (source as PreviewSource).head;
+	let head = isArray ? (source as readonly string[]) : (source as PreviewSource).head;
 	let total = isArray ? head.length : (source as PreviewSource).total;
 
 	// 尾部空行不参与计数（也不进预览）。
@@ -559,11 +628,7 @@ export function collapsePreviewLines(
 	if (isArray) {
 		while (total > 0 && !(head[total - 1] ?? "").trim()) total--;
 	} else {
-		// PreviewSource：head 之外的行数不可见，只能对 head 覆盖到的尾部空行做裁剪
-		const covered = Math.min(total, head.length);
-		let visible = covered;
-		while (visible > 0 && !(head[visible - 1] ?? "").trim()) visible--;
-		total -= covered - visible;
+		({ head, total } = trimTrailingBlanks({ head: [...head], total }));
 	}
 
 	const lines: string[] = [];
@@ -611,17 +676,21 @@ export function headLinesOfTexts(texts: readonly string[], maxLines: number): Pr
 			start = newline + 1;
 		}
 	}
-	// 尾部空行既不算预览行、也不该算进"还有多少行"。
-	// （head 被 maxLines 截断时只能扣 head 里看得见的那部分。）
-	const covered = Math.min(total, head.length);
+	// 尾部空行既不算预览行、也不该算进"还有多少行"，与 collapsePreviewLines 同一口径。
+	return trimTrailingBlanks({ head, total });
+}
+
+/**
+ * 裁尾部空行：head 之外的行数不可见，只能扣 head 覆盖到的那部分
+ * （collapsePreviewLines 与 headLinesOfTexts 共用这一段，别各写一遍）。
+ */
+function trimTrailingBlanks(source: PreviewSource): PreviewSource {
+	const covered = Math.min(source.total, source.head.length);
 	let visible = covered;
-	while (visible > 0 && !(head[visible - 1] ?? "").trim()) visible--;
+	while (visible > 0 && !(source.head[visible - 1] ?? "").trim()) visible--;
 	const trimmed = covered - visible;
-	if (trimmed > 0) {
-		head.length = visible;
-		total -= trimmed;
-	}
-	return { head, total };
+	if (trimmed === 0) return source;
+	return { head: source.head.slice(0, visible), total: source.total - trimmed };
 }
 
 /** 去掉 UTF-8 BOM（readFile 不剥；JSON.parse 与 diff 都容不下 BOM）。 */
@@ -912,6 +981,7 @@ export function tailVisualRows(
 	}
 	if (end === 0) return { rows: [], more: false };
 
+	// 反向收集可视行，最后一次 reverse 归位（比每行 unshift 少搬数据）。
 	const segments: string[] = [];
 	let cursor = end;
 	for (let lineCount = 0; cursor > 0 && lineCount < TAIL_MAX_SOURCE_LINES; lineCount++) {
@@ -920,7 +990,7 @@ export function tailVisualRows(
 		let line = body.slice(start, cursor);
 		if (line.endsWith("\r")) line = line.slice(0, -1);
 		const wrapped = wrapTextWithAnsi(line, contentWidth);
-		segments.unshift(...wrapped);
+		for (let i = wrapped.length - 1; i >= 0; i--) segments.push(wrapped[i]!);
 		cursor = newline === -1 ? 0 : newline;
 		if (segments.length >= rows) break;
 	}
@@ -929,6 +999,7 @@ export function tailVisualRows(
 		segments.splice(0, segments.length - rows);
 		more = true;
 	}
+	segments.reverse();
 	return { rows: segments, more };
 }
 
@@ -967,6 +1038,18 @@ export interface LiveTailOptions {
 	maxLines: number;
 	/** 运行中在最后一行追一个静态光标（不闪）。 */
 	cursor?: boolean;
+	/**
+	 * 额外的左缩进（默认空串）。嵌在别的块里时用它整体再缩进一级，
+	 * 与调用方自己画的行保持同一列。
+	 */
+	indent?: string;
+	/**
+	 * 第一行是否用 `⎿` 连接符（默认 true）。
+	 *
+	 * 外面已经用 `⎿` 挂了别的东西（例如子代理块的任务行）时传 false，
+	 * 窗口内容全部走等宽续行前缀，避免一层里出现两个 `⎿`。
+	 */
+	firstConnector?: boolean;
 	/** 顶部"上面还有内容"提示；给 undefined 表示不显示。 */
 	moreHint?: string;
 	/**
@@ -1015,7 +1098,7 @@ export class LiveTailView extends CachedView {
 		const refreshMs = this.options.refreshMs ?? 0;
 		if (refreshMs <= 0) return text;
 		const slot = Math.floor(Date.now() / Math.max(16, refreshMs));
-		if (finished || slot !== state.slot || state.text === undefined || state.text === "") {
+		if (finished || slot !== state.slot || !state.text) {
 			state.slot = slot;
 			state.text = text;
 		}
@@ -1044,7 +1127,11 @@ export class LiveTailView extends CachedView {
 	protected renderLines(width: number): string[] {
 		const text = this.snapshot(this.source.text(), this.source.finished());
 		const finished = this.source.finished();
-		const contentWidth = Math.max(1, width - UI_INDENT_WIDTH - PREVIEW_CONNECTOR_WIDTH);
+		const indent = this.options.indent ?? "";
+		const contentWidth = Math.max(
+			1,
+			width - UI_INDENT_WIDTH - indent.length - PREVIEW_CONNECTOR_WIDTH,
+		);
 		const { rows, more } = tailWindow(
 			text,
 			this.options.maxLines,
@@ -1059,8 +1146,9 @@ export class LiveTailView extends CachedView {
 		const emit = (segments: string[]): void => {
 			if (segments.length === 0) return;
 			segments.forEach((segment, index) => {
-				const prefix = firstLine && index === 0 ? PREVIEW_CONNECTOR_FIRST : PREVIEW_CONNECTOR_REST;
-				out.push(UI_INDENT + prefix + segment);
+				const connector = firstLine && index === 0 && this.options.firstConnector !== false;
+				const prefix = connector ? PREVIEW_CONNECTOR_FIRST : PREVIEW_CONNECTOR_REST;
+				out.push(UI_INDENT + indent + prefix + segment);
 			});
 			firstLine = false;
 		};

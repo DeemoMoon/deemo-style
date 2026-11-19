@@ -15,8 +15,6 @@ import {
 	AssistantMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import {
-} from "node:path";
-import {
 	BOLD_OFF,
 	BOLD_ON,
 	CachedView,
@@ -37,6 +35,8 @@ import {
 	SKY_BLUE,
 	shimmerFrame,
 	shimmerText,
+	patchPrototypeSlots,
+	unpatchPrototypeSlots,
 	tailWindow,
 	stripAnsi,
 	THINKING_YELLOW,
@@ -58,14 +58,22 @@ import type {
  * 多窗口复用组件实例时都会发生），拿它的行数去决定要不要跳，会误跳。
  */
 const renderedLinesByMessage = new Map<number, number>();
+/** 同毫秒内多条消息的仲裁序号（timestamp 相同时按它取最新）。 */
+let renderedLinesSeq = 0;
+const renderedSeqByMessage = new Map<number, number>();
+/** 最近一次记录的 (时间戳, 行数)：agent_settled 跳回时用身份而不是"时间戳最新"。 */
+let lastRecorded: { timestamp: number; lines: number } | undefined;
 
 function recordRenderedLines(timestamp: number, lines: number): void {
 	if (!Number.isFinite(timestamp)) return;
 	renderedLinesByMessage.set(timestamp, lines);
+	renderedSeqByMessage.set(timestamp, ++renderedLinesSeq);
+	lastRecorded = { timestamp, lines };
 	// 只留最近的若干条：会话很长时不至于无限增长
 	if (renderedLinesByMessage.size > 200) {
 		const oldest = Math.min(...renderedLinesByMessage.keys());
 		renderedLinesByMessage.delete(oldest);
+		renderedSeqByMessage.delete(oldest);
 	}
 }
 
@@ -89,13 +97,23 @@ function renderedLinesKey(instance: RuntimePrototype): number {
 	return 0;
 }
 
-/** 最新那条助手消息的行数（= 刚生成完的回复；没有记录时为 0）。 */
+/**
+ * 跳回回复开头用的行数：优先取**最新渲染的那条**消息（agent_settled 时它就是
+ * 刚结束的回复，避免 `/tree` 切分支后历史消息的"时间戳最新"记录误伤）；
+ * 同毫秒撞 timestamp 时按仲裁序号取最新，都没有记录时为 0。
+ */
 export function lastAssistantRenderLines(): number {
+	if (lastRecorded !== undefined && renderedLinesByMessage.has(lastRecorded.timestamp)) {
+		return lastRecorded.lines;
+	}
 	let newest = 0;
+	let bestSeq = -1;
 	let lines = 0;
 	for (const [timestamp, count] of renderedLinesByMessage) {
-		if (timestamp >= newest) {
+		const seq = renderedSeqByMessage.get(timestamp) ?? 0;
+		if (timestamp > newest || (timestamp === newest && seq > bestSeq)) {
 			newest = timestamp;
+			bestSeq = seq;
 			lines = count;
 		}
 	}
@@ -105,6 +123,8 @@ export function lastAssistantRenderLines(): number {
 /** 清空记录（切换会话时调用，避免跨会话串味）。 */
 export function resetRenderedLines(): void {
 	renderedLinesByMessage.clear();
+	renderedSeqByMessage.clear();
+	lastRecorded = undefined;
 }
 
 /**
@@ -170,17 +190,7 @@ interface RuntimePrototype {
 	__piAssistantStyleTimestamp?: number;
 	/** 变换结果缓存：pi 的 ScrollView 每帧全量重渲染，没缓存时逐行正则会反复执行。 */
 	__piAssistantStyleCache?: AssistantRenderCache;
-	__piAssistantGutterPatched?: boolean;
-	__piAssistantGutterUpdatePatched?: boolean;
-	__piAssistantGutterOriginalRender?: (width: number) => string[];
-	__piAssistantGutterOriginalHandleMouse?: (event: MouseEventLike) => unknown;
-	__piAssistantGutterOriginalUpdateContent?: (message: unknown, isStreaming?: boolean) => void;
-	__piAssistantGutterOriginalSetHideThinkingBlock?: (hide: boolean) => void;
-	/** 我们打上去的函数本身（所有权校验用） */
-	__piAssistantGutterPatchedRender?: (width: number) => string[];
-	__piAssistantGutterPatchedHandleMouse?: (event: MouseEventLike) => unknown;
-	__piAssistantGutterPatchedUpdateContent?: (message: unknown, isStreaming?: boolean) => void;
-	__piAssistantGutterPatchedSetHideThinkingBlock?: (hide: boolean) => void;
+	[key: `ui-style:${string}`]: unknown;
 }
 
 /**
@@ -685,15 +695,13 @@ function applyThinkingHeaders(
 
 export function patchAssistantMessageStyle(): void {
 	const proto = AssistantMessageComponent.prototype as unknown as RuntimePrototype;
-	// 同一个进程里 /reload 或切换会话时，先恢复原方法，确保最新代码生效。
-	if (proto.__piAssistantGutterPatched || proto.__piAssistantGutterUpdatePatched) {
-		unpatchAssistantMessageStyle();
-	}
 
+	// 先在补丁体外捕获原方法：patchPrototypeSlots 内部会先做一次恢复再重打，
+	// 在原方法槽位上读取才是 pi 的实现（补丁幂等由 patchPrototypeSlots 保证）。
 	const originalRender = proto.render;
 	const originalHandleMouse = proto.handleMouse;
-	proto.__piAssistantGutterOriginalRender = originalRender;
-	proto.__piAssistantGutterOriginalHandleMouse = originalHandleMouse;
+	const originalUpdateContent = proto.updateContent;
+	const originalSetHideThinkingBlock = proto.setHideThinkingBlock;
 
 	const patchedRender = function (this: RuntimePrototype, width: number): string[] {
 		// 终端极窄时不做缩进，避免行宽溢出。
@@ -710,7 +718,6 @@ export function patchAssistantMessageStyle(): void {
 			return originalRender.call(this, width);
 		}
 	};
-	proto.render = patchedRender as RuntimePrototype["render"];
 
 	/** 实际的行级变换（缓存、去内边距、删围栏行、加图标）。 */
 	function renderStyled(this: RuntimePrototype, width: number): string[] {
@@ -829,7 +836,7 @@ export function patchAssistantMessageStyle(): void {
 		return result;
 	};
 
-	// 三个"我们打上去的函数"先声明，方便统一记录所有权标记（unpatch 时校验）。
+	// 三个"我们打上去的函数"先声明，方便统一交给 patchPrototypeSlots 登记。
 	let patchedHandleMouse: RuntimePrototype["handleMouse"];
 	let patchedUpdateContent: RuntimePrototype["updateContent"];
 	let patchedSetHideThinkingBlock: RuntimePrototype["setHideThinkingBlock"];
@@ -876,14 +883,11 @@ export function patchAssistantMessageStyle(): void {
 				return originalHandleMouse.call(this, event);
 			}
 		};
-		proto.handleMouse = patchedHandleMouse;
 	}
 
 	// 重建内容时：用户没显式切换过就默认折叠（尊重设置里的 hideThinkingBlock），
 	// 并把折叠态标签换成带计时的自定义标题。
-	const originalUpdateContent = proto.updateContent;
 	if (typeof originalUpdateContent === "function") {
-		proto.__piAssistantGutterOriginalUpdateContent = originalUpdateContent;
 		patchedUpdateContent = function (
 			this: RuntimePrototype,
 			message?: unknown,
@@ -912,26 +916,27 @@ export function patchAssistantMessageStyle(): void {
 				// 标题/预览只是装饰：失败就保留 pi 自己的标签，不能影响消息本体。
 			}
 		};
-		proto.updateContent = patchedUpdateContent;
-		proto.__piAssistantGutterUpdatePatched = true;
 	}
 
 	// 用户显式切换全局 thinking 可见性时打标记（内部会自己调 updateContent）。
-	const originalSetHideThinkingBlock = proto.setHideThinkingBlock;
 	if (typeof originalSetHideThinkingBlock === "function") {
-		proto.__piAssistantGutterOriginalSetHideThinkingBlock = originalSetHideThinkingBlock;
 		patchedSetHideThinkingBlock = function (this: RuntimePrototype, hide: boolean): void {
 			this.__piAssistantHideThinkingUserSet = true;
 			originalSetHideThinkingBlock.call(this, hide);
 		};
-		proto.setHideThinkingBlock = patchedSetHideThinkingBlock;
 	}
 
-	proto.__piAssistantGutterPatchedRender = patchedRender;
-	proto.__piAssistantGutterPatchedHandleMouse = patchedHandleMouse;
-	proto.__piAssistantGutterPatchedUpdateContent = patchedUpdateContent;
-	proto.__piAssistantGutterPatchedSetHideThinkingBlock = patchedSetHideThinkingBlock;
-	proto.__piAssistantGutterPatched = true;
+	const impls: Record<string, (...args: never[]) => unknown> = {
+		render: patchedRender as (...args: never[]) => unknown,
+	};
+	if (patchedHandleMouse) impls.handleMouse = patchedHandleMouse as (...args: never[]) => unknown;
+	if (patchedUpdateContent) {
+		impls.updateContent = patchedUpdateContent as (...args: never[]) => unknown;
+	}
+	if (patchedSetHideThinkingBlock) {
+		impls.setHideThinkingBlock = patchedSetHideThinkingBlock as (...args: never[]) => unknown;
+	}
+	patchPrototypeSlots(proto, "ui-style:assistant", impls);
 }
 
 /** 恢复 pi 原来的渲染方法；删除扩展或重启时使用。 */
@@ -943,46 +948,12 @@ export function patchAssistantMessageStyle(): void {
  */
 export function unpatchAssistantMessageStyle(): void {
 	const proto = AssistantMessageComponent.prototype as unknown as RuntimePrototype;
-	const ownsRender = proto.__piAssistantGutterPatchedRender === proto.render;
-	const ownsUpdate = proto.__piAssistantGutterPatchedUpdateContent === proto.updateContent;
-	const ownsMouse = proto.__piAssistantGutterPatchedHandleMouse === proto.handleMouse;
-	const ownsHide = proto.__piAssistantGutterPatchedSetHideThinkingBlock === proto.setHideThinkingBlock;
-	if (!ownsRender && !ownsUpdate && !ownsMouse && !ownsHide) return;
-
-	if (ownsRender && proto.__piAssistantGutterOriginalRender) {
-		proto.render = proto.__piAssistantGutterOriginalRender;
-	}
-	if (ownsMouse) {
-		if (proto.__piAssistantGutterOriginalHandleMouse) {
-			proto.handleMouse = proto.__piAssistantGutterOriginalHandleMouse;
-		} else {
-			delete proto.handleMouse;
-		}
-	}
-	if (ownsUpdate && proto.__piAssistantGutterOriginalUpdateContent) {
-		proto.updateContent = proto.__piAssistantGutterOriginalUpdateContent;
-	}
-	if (ownsHide && proto.__piAssistantGutterOriginalSetHideThinkingBlock) {
-		proto.setHideThinkingBlock = proto.__piAssistantGutterOriginalSetHideThinkingBlock;
-	}
-
-	if (ownsRender) {
-		delete proto.__piAssistantGutterOriginalRender;
-		delete proto.__piAssistantGutterPatchedRender;
-		delete proto.__piAssistantGutterPatched;
-	}
-	if (ownsMouse) {
-		delete proto.__piAssistantGutterOriginalHandleMouse;
-		delete proto.__piAssistantGutterPatchedHandleMouse;
-	}
-	if (ownsUpdate) {
-		delete proto.__piAssistantGutterOriginalUpdateContent;
-		delete proto.__piAssistantGutterPatchedUpdateContent;
-		delete proto.__piAssistantGutterUpdatePatched;
-	}
-	if (ownsHide) {
-		delete proto.__piAssistantGutterOriginalSetHideThinkingBlock;
-		delete proto.__piAssistantGutterPatchedSetHideThinkingBlock;
-	}
+	// 只恢复"当前槽位上仍是我们的函数"的那些；其余情况（别人改过/没打过）原样不动。
+	unpatchPrototypeSlots(proto, "ui-style:assistant", [
+		"render",
+		"handleMouse",
+		"updateContent",
+		"setHideThinkingBlock",
+	]);
 }
 

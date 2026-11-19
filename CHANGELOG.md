@@ -1,5 +1,66 @@
 # Changelog
 
+## [1.3.0] - 2026-11-19
+
+### 新功能：子代理面板（subagent 工具）
+把 pi 自带 subagent 扩展的「✓✗⏳ + ─── Step ───」默认渲染收进本扩展的统一视觉
+（Nerd Font 图标 + 着色标题 + `⎿` 滚动窗口 + BlockClock 计时），支持单个 / 并行 /
+链式三种模式。拆成三层：`subagent-data.ts`（纯函数）→ `subagent-block.ts`（块渲染）
+→ `subagent-panel.ts`（窗口与入口）。
+
+- **每个块 = 缩小版单个 agent**：块标题（`\uF4BE 名称 · ⏱ 耗时 · 状态标记`，运行中整行
+  扫光）→ 黄色 `「任务」`（完整显示，含链式的 `{previous}`，段落空行压缩）→ 4 行滚动
+  输出（运行中，末行 `▍`）或结论头 4 行 + `还有 N 行`（完成）→ 过程摘要/过程列表 →
+  底行（token · 模型 · 思考强度 · 命中率）。`Ctrl+O` 展开全文与工具调用过程。
+- **单个模式不做两级结构**：标题已含名称，不再来一层 `⎿ \uF4BE ⏳ 名称`。
+- **并行**：固定窗口 3 个块 + 每 2.5s 轮播（环绕），`还有 N 个子代理` 提示；窗口内块
+  等高补齐，轮播时整屏不跳。**不使用定时器**：相位由 `Date.now()` 算，搭 pi 自己的帧。
+- **链式**：只显示当前这一步（有 running 显示它，否则第一个 pending，都结束显示最后
+  一步），块标题保留 `1. / 2. / 3.` 编号。
+- **进度点**：`●` 实心=有结果（绿成功、红失败）、`○` 空心=没结果（黄执行中、灰未开始）。
+  全 1 列宽、非 emoji、点位固定。链式按 `args.chain.length` 一次画满（`details.results`
+  是执行一步才长一个的）。
+- **状态行**：块顶部一行兼做进度与汇总（`●●● 3/4 完成 · 1 失败 · in 5.4k · out 600 ·
+  cache 80.0%`），命中率与底行同一套档位色；不再有独立的 `Total` 行。
+- 修过的问题：`renderCall` 写死 running 导致结束后标题一直扫光、耗时一直涨；状态标记
+  慢一帧（改为惰性读 `state.mark`）；等高补齐把链式补出一大片空白；轮播定时器导致
+  8 任务时"屏幕闪一下"（已删除定时器）。
+
+### 代码质量：原型补丁统一 + 一轮 bug 修复
+- `core.ts` 新增 `patchPrototypeSlots` / `unpatchPrototypeSlots`（幂等 patch、按槽位
+  所有权恢复、任何路径都清标志），assistant / skill-banner / bash-exec / user-message
+  四处共用，删掉三套语义各异的哨兵逻辑。
+- `core.ts`：`trimTrailingBlanks` 收敛两处尾部空行裁剪；新增 `chromeLine`；`tailVisualRows`
+  改反向收集 + 一次 reverse；`LiveTailView` 新增 `indent` / `firstConnector` 选项。
+- `panels.ts`：抽 `resetOnArgsChange`；diff 归一化提前到赋值时并缓存行；partial 输出从
+  尾部累加（不再全量 join）；`cleanedTailText` 回扫限 40 字符。
+- `info-panel.ts`：`withBusy()` 收敛三处 busy 拷贝；`attachListHandlers()` 收敛下拉回调。
+- `session-stats.ts`：合并为单遍遍历（每条 entry 只 `Date.parse` 一次）。
+- `editor.ts`：`BORDER_INSET` 常量消除三处硬编码。
+- `infobar.ts`：tick 按"显示值快照"去重，没变不请求重绘；参数估算加 8KB 块级预算。
+- `startup.ts`：技能递归同层并行、扩展入口探测短路、MCP 去重改 Set。
+
+### 修复
+- `panels.ts`：`hintOptions` 死代码导致自定义 `app.tools.expand` 键位提示不生效。
+- `session-stats.ts`：无 timestamp 的 user 消息会把「上轮结束→现在」虚增进 `activeMs`。
+- `info-panel.ts`：编辑态按 →/End/Ctrl+E/Delete 不清全选态；下拉鼠标转发 x 偏移少 2 列
+  （漏 `ROW_PREFIX_WIDTH`）；`busy` 有微任务窗口导致连按 Enter 可重入并发 `setModel`。
+- `edit-preview.ts`：FIFO/设备文件会让预览永久卡死（加 `info.isFile()`）；唯一性判断改
+  单次扫描。
+- `startup.ts`：非 git 目录下祖先 `.agents/skills` 被跳过；`~\foo` 展开残留反斜杠。
+- `statusline.ts`：git 异步回调把旧 cwd 的结果写进新 cwd 的缓存槽；失败时多余的重绘。
+- `user-message.ts`：`\uE370` 图标插在引用/标题/列表前缀之后，污染块结构。
+- `path-text.ts`：`shortenHome` 在 Linux 上把 `/HOME/x` 误缩成 `~/x`；`toLowerCase()` 改变
+  长度时 `slice` 错位。抽出纯函数 `stripHomePrefix(path, home, caseInsensitive)` 便于单测。
+- `reading.ts`：跳回回复开头可能落到历史消息（同毫秒 timestamp / 历史重渲染）。
+- `context-bar.ts`：填充格数与格子颜色档位错位（统一按中点口径）。
+- `core.ts`：`LiveTailView.snapshot` 空文本边界判断不对称。
+
+### 测试
+- 97 → 120 个用例：原型补丁助手、`activeMs` 缺口、进度点颜色/间距、链式窗口选择、
+  并行轮播相位、任务不丢字、任务区无空行、链式任务完整、等高补齐不产生空白等。
+- `tests/static-check.mjs`：修展开运算符 `...name` 被误判成未使用的误报。
+
 ## [1.2.0] - 2026-11-17
 
 ### 会话信息面板改版（`alt+i`）

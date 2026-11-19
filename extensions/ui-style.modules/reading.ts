@@ -70,6 +70,10 @@ function viewportHeightOf(bridge: ScrollBridge): number {
 export function setupJumpToReplyStart(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		// 防御顺序变化：若 pi 改成先 start 后 shutdown（旧会话的 shutdown
+		// 在新会话 start 之后才跑），shutdown 里清 sharedTui 会把新会话刚
+		// 写入的引用清掉。所以重置放在 start 开头无条件做，shutdown 只管 widget。
+		sharedTui = undefined;
 		// 借一个 0 行的 widget 拿到 TUI 引用（不占任何屏幕高度）
 		ctx.ui.setWidget(WIDGET_KEY, (tui) => {
 			sharedTui = tui;
@@ -103,7 +107,8 @@ export function setupJumpToReplyStart(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
-		sharedTui = undefined;
+		// 只清 widget，不清 sharedTui：见 session_start 里的顺序防御注释，
+		// 避免旧会话的 shutdown 晚于新会话的 start 时误清新会话的 TUI 引用。
 		ctx.ui.setWidget(WIDGET_KEY, undefined);
 	});
 }

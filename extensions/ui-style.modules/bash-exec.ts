@@ -35,6 +35,8 @@ import {
 	sgr,
 	shimmerText,
 	touchClock,
+	patchPrototypeSlots,
+	unpatchPrototypeSlots,
 	UI_INDENT,
 	UI_INDENT_WIDTH,
 	WARN_YELLOW,
@@ -73,10 +75,7 @@ interface BashExecLike {
 
 interface BashExecPrototype extends BashExecLike {
 	updateDisplay(): void;
-	__piBashExecOriginalUpdateDisplay?: () => void;
-	__piBashExecPatched?: () => void;
-	/** 我们打上去的 updateDisplay 本身（所有权校验用） */
-	__piBashExecPatchedUpdateDisplay?: () => void;
+	[key: `ui-style:${string}`]: unknown;
 }
 
 /**
@@ -371,9 +370,9 @@ function rebuildExecDisplay(instance: BashExecLike): void {
 
 export function patchBashExec(): void {
 	const proto = BashExecutionComponent.prototype as unknown as BashExecPrototype;
-	unpatchBashExec();
+	// 先捕获原方法：patchPrototypeSlots 内部会做一次恢复再重打（幂等）。
+	const originalUpdateDisplay = proto.updateDisplay;
 
-	proto.__piBashExecOriginalUpdateDisplay = proto.updateDisplay;
 	const patchedUpdateDisplay = function (this: BashExecPrototype): void {
 		// `!` 命令也是有生命周期的块：running 开始计时，结束就地定格
 		// （与工具面板、思考块共用同一套 BlockClock）。
@@ -388,30 +387,15 @@ export function patchBashExec(): void {
 			// 如果还留在实例上，下次 updateDisplay 只会 invalidate 而不会重新挂载，
 			// 变成孤儿视图。这里顺手丢掉，让下次从原生组件重建。
 			this.__piExecView = undefined;
-			proto.__piBashExecOriginalUpdateDisplay?.call(this);
+			originalUpdateDisplay.call(this);
 		}
 	};
-	proto.updateDisplay = patchedUpdateDisplay;
-	proto.__piBashExecPatchedUpdateDisplay = patchedUpdateDisplay;
-	proto.__piBashExecPatched = patchedUpdateDisplay;
+	patchPrototypeSlots(proto, "ui-style:bash-exec", { updateDisplay: patchedUpdateDisplay });
 }
 
 /** 恢复 pi 原来的渲染方法；删除扩展或重启时使用。 */
 export function unpatchBashExec(): void {
 	const proto = BashExecutionComponent.prototype as unknown as BashExecPrototype;
-	// 只在自己仍然拥有这个槽位时才恢复（/reload 时新实例可能已经打过补丁）
-	if (
-		!proto.__piBashExecPatchedUpdateDisplay ||
-		proto.updateDisplay !== proto.__piBashExecPatchedUpdateDisplay
-	) {
-		return;
-	}
-
-	if (proto.__piBashExecOriginalUpdateDisplay) {
-		proto.updateDisplay = proto.__piBashExecOriginalUpdateDisplay;
-	}
-	delete proto.__piBashExecOriginalUpdateDisplay;
-	delete proto.__piBashExecPatchedUpdateDisplay;
-	delete proto.__piBashExecPatched;
+	unpatchPrototypeSlots(proto, "ui-style:bash-exec", ["updateDisplay"]);
 }
 

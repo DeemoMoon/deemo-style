@@ -14,6 +14,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 initTheme("dark");
 import {
 	cleanText,
+	chromeLine,
 	clockElapsedMs,
 	collapsePreviewLines,
 	execClockText,
@@ -25,9 +26,11 @@ import {
 	headLinesOfTexts,
 	moreLinesNoun,
 	mixRgb,
+	patchPrototypeSlots,
 	promptTokens,
 	shimmerFrame,
 	shimmerPosition,
+	SHIMMER_PERIOD_MS,
 	shimmerText,
 	shortenTail,
 	shortenHome,
@@ -36,8 +39,12 @@ import {
 	tailVisualRows,
 	touchClock,
 	trimZero,
+	unpatchPrototypeSlots,
 	formatCwd,
 	shortenPathLine,
+	BOLD_OFF,
+	BOLD_ON,
+	CHROME_PAD,
 	ExtensionStatusText,
 } from "../core.ts";
 import {
@@ -223,11 +230,13 @@ test("mixRgb：按比例混合并钳制越界值", () => {
 
 test("shimmerPosition：三角波左右往返（0 → 1 → 0）", () => {
 	const base = 1_000;
+	// 周期从常量取，调速度不会让用例失效
+	const period = SHIMMER_PERIOD_MS;
 	assert.equal(shimmerPosition(base, base), 0);
-	assert.equal(shimmerPosition(base, base + 350), 0.5);
-	assert.equal(shimmerPosition(base, base + 700), 1);
-	assert.equal(shimmerPosition(base, base + 1050), 0.5);
-	assert.ok(Math.abs(shimmerPosition(base, base + 1400)) < 1e-9);
+	assert.ok(Math.abs(shimmerPosition(base, base + period / 4) - 0.5) < 1e-9);
+	assert.ok(Math.abs(shimmerPosition(base, base + period / 2) - 1) < 1e-9);
+	assert.ok(Math.abs(shimmerPosition(base, base + (period * 3) / 4) - 0.5) < 1e-9);
+	assert.ok(Math.abs(shimmerPosition(base, base + period)) < 1e-9);
 	// 时间倒流（理论上不该发生）也不能出现 NaN
 	assert.ok(Number.isFinite(shimmerPosition(base, base - 100)));
 });
@@ -651,6 +660,99 @@ test("#5 stripBackgroundSgr：47 / 100 / 48;2 与非法 mode", () => {
 	assert.ok(!/\[41m|;41/.test(mixed), `背景 41 仍应剥掉：${JSON.stringify(mixed)}`);
 });
 
+test("patchPrototypeSlots / unpatchPrototypeSlots：打补丁替换方法，unpatch 恢复原方法", () => {
+	const proto = { greet: () => "hi" };
+	const original = proto.greet;
+	const patched = () => "patched";
+	patchPrototypeSlots(proto, "t", { greet: patched });
+	assert.equal(proto.greet, patched);
+	assert.equal(proto.greet(), "patched");
+	unpatchPrototypeSlots(proto, "t", ["greet"]);
+	assert.equal(proto.greet, original);
+	assert.equal(proto.greet(), "hi");
+});
+
+test("patchPrototypeSlots：连续 patch 两次是 no-op，original 不被覆盖", () => {
+	const originalA = () => 1;
+	const originalB = () => 2;
+	const proto = { a: originalA, b: originalB };
+	const implA = () => 10;
+	const implB = () => 20;
+	patchPrototypeSlots(proto, "t", { a: implA, b: implB });
+	patchPrototypeSlots(proto, "t", { a: implA, b: implB });
+	assert.equal(proto.a, implA);
+	assert.equal(proto.b, implB);
+	// original 仍是最初的原方法（不能是我们自己打上去的补丁，否则 unpatch 恢复不回 pi）
+	const record = proto as Record<string, unknown>;
+	assert.equal(record["t:original:a"], originalA);
+	assert.equal(record["t:original:b"], originalB);
+	unpatchPrototypeSlots(proto, "t", ["a", "b"]);
+	assert.equal(proto.a, originalA);
+	assert.equal(proto.b, originalB);
+});
+
+test("patchPrototypeSlots：槽位被第三方改写后 unpatch 不动它，标志清干净", () => {
+	const proto = { a: () => 1 } as Record<string, unknown>;
+	patchPrototypeSlots(proto, "t", { a: () => 10 });
+	const foreign = () => 99;
+	proto.a = foreign;
+	unpatchPrototypeSlots(proto, "t", ["a"]);
+	assert.equal(proto.a, foreign, "第三方函数不能被覆盖回原方法");
+	// 失权路径也必须清标志，否则 /reload 再次 patch 会读到残留的 original
+	for (const key of ["t:a", "t:original:a", "t:patched:a"]) {
+		assert.equal(key in proto, false, `失权路径必须清掉 ${key}`);
+	}
+	// 标志清干净之后再次 patch 正常工作（这次 original 记的是第三方函数）
+	const impl2 = () => 20;
+	patchPrototypeSlots(proto, "t", { a: impl2 });
+	assert.equal(proto.a, impl2);
+	unpatchPrototypeSlots(proto, "t", ["a"]);
+	assert.equal(proto.a, foreign);
+});
+
+test("patchPrototypeSlots：patch 中途部分失权，unpatch 只恢复仍持有的槽位", () => {
+	const originalA = () => 1;
+	const originalB = () => 2;
+	const proto = { a: originalA, b: originalB } as Record<string, unknown>;
+	patchPrototypeSlots(proto, "t", { a: () => 10, b: () => 20 });
+	const foreign = () => 99;
+	proto.a = foreign;
+	const restored = unpatchPrototypeSlots(proto, "t", ["a", "b"]);
+	assert.equal(restored, true, "至少收回了 b");
+	assert.equal(proto.a, foreign, "失权的 a 保持第三方函数");
+	assert.equal(proto.b, originalB, "仍持有的 b 恢复原方法");
+});
+
+test("computeSessionStats：缺 timestamp 的第二轮不从上一轮结束时间虚增 activeMs", () => {
+	const entries = [
+		{ type: "message", timestamp: "2026-01-01T00:00:00.000Z", message: { role: "user" } },
+		{ type: "message", timestamp: "2026-01-01T00:00:05.000Z", message: { role: "assistant" } },
+		// 缺 timestamp 的用户消息：turnStart 必须归 0，而不是回退用上一轮的结束时间
+		{ type: "message", message: { role: "user" } },
+		{ type: "message", timestamp: "2026-01-01T00:00:10.000Z", message: { role: "assistant" } },
+	];
+	const stats = computeSessionStats(entries, Date.parse("2026-01-01T03:00:00.000Z"));
+	assert.equal(stats.turnCount, 2);
+	assert.equal(stats.activeMs, 5000, "只累计第一轮（5s），缺 timestamp 的第二轮不计");
+	assert.equal(stats.wallMs, 10_000);
+});
+
+test("renderContextBar：填充格按「格子中点 <= percent」计（75% / 10 格 = 8 格）", () => {
+	const filled = (bar: string) => (bar.match(/\u25A3/g) ?? []).length;
+	// 10 格的中点是 5,15,...,95；<= 75 的有 8 格（边界 75 本身算填充）
+	assert.equal(filled(renderContextBar(75, 10)), 8);
+	assert.equal(filled(renderContextBar(0, 10)), 0);
+	assert.equal(filled(renderContextBar(null, 10)), 0);
+	assert.equal(filled(renderContextBar(undefined, 10)), 0);
+	// 未知占用率也要画满 cells 个暗灰空心格
+	assert.equal(visibleWidth(renderContextBar(null, 10)), 10);
+});
+
+test("chromeLine：CHROME_PAD + BOLD_ON + 内容 + BOLD_OFF", () => {
+	assert.equal(chromeLine("内容"), `${CHROME_PAD}${BOLD_ON}内容${BOLD_OFF}`);
+	assert.equal(chromeLine(""), `${CHROME_PAD}${BOLD_ON}${BOLD_OFF}`);
+});
+
 test("#1 ExtensionStatusText：插入序≠字母序时第二次调用命中缓存", () => {
 	const cache = new ExtensionStatusText();
 	const statuses = new Map([
@@ -701,4 +803,54 @@ test("缓存命中率方向：越高越好（99.2% 绿、40% 红），别和上�
 
 	// 颜色映射不能混
 	assert.deepEqual(levelRgb(99.2), LEVEL_BAR_FILL.bad);
+});
+
+test("stripHomePrefix：Linux 上大小写必须敏感（/HOME/x 不能被当成 home）", async () => {
+	const { stripHomePrefix } = await import("../path-text.ts");
+
+	// 大小写敏感（Linux）：只有完全相同的前缀才算 home
+	assert.equal(stripHomePrefix("/home/u/proj", "/home/u", false), "/proj");
+	assert.equal(stripHomePrefix("/home/u", "/home/u", false), "");
+	// 大小写不同 → 不是 home（这是原实现最坑的地方：/HOME/x 会被误缩成 ~/x）
+	assert.equal(stripHomePrefix("/HOME/u/proj", "/home/u", false), undefined);
+	assert.equal(stripHomePrefix("/Home/U/proj", "/home/u", false), undefined);
+
+	// 大小写不敏感（Windows/macOS）：命中并且 rest 取原串（保留大小写）
+	assert.equal(stripHomePrefix("/HOME/u/proj", "/home/u", true), "/proj");
+	assert.equal(stripHomePrefix("/HOME/U/Proj", "/home/u", true), "/Proj");
+});
+
+test("stripHomePrefix：同前缀的兄弟目录不会被误缩", async () => {
+	const { stripHomePrefix, shortenHome } = await import("../path-text.ts");
+
+	// /home/u2 不是 /home/u 的子路径
+	assert.equal(stripHomePrefix("/home/u2/proj", "/home/u", false), undefined);
+	// Windows 路径同理
+	assert.equal(stripHomePrefix("C:\\Users\\x2\\a", "C:\\Users\\x", true), undefined);
+	assert.equal(stripHomePrefix("C:\\Users\\x\\a", "C:\\Users\\x", true), "\\a");
+
+	// shortenHome 走 HOME 常量：不在 home 下就原样返回
+	assert.equal(shortenHome("/definitely/not/home/dir"), "/definitely/not/home/dir");
+});
+
+test("stripHomePrefix：home 末尾的分隔符不影响判断", async () => {
+	const { stripHomePrefix } = await import("../path-text.ts");
+
+	assert.equal(stripHomePrefix("/home/u/a", "/home/u/", false), "/a");
+	assert.equal(stripHomePrefix("/home/u", "/home/u/", false), "");
+	// 根目录不能因为去尾分隔符变成空串
+	assert.equal(stripHomePrefix("/etc/hosts", "/", false), "etc/hosts");
+});
+
+test("stripHomePrefix：toLowerCase 会改变长度时也不能错位", async () => {
+	const { stripHomePrefix } = await import("../path-text.ts");
+
+	// "İ".toLowerCase() 是 2 个码点（i + 组合点），原实现用 toLowerCase().startsWith
+	// 判断、再用 HOME.length 截原串，遇到这种字符下标就会错。
+	const home = "/home/\u0130x";
+	const path = "/home/\u0130x/proj";
+	assert.equal(stripHomePrefix(path, home, false), "/proj");
+	assert.equal(stripHomePrefix(path, home, true), "/proj");
+	// 长度不足时直接不命中（不能越界切片）
+	assert.equal(stripHomePrefix("/home/\u0130", home, false), undefined);
 });

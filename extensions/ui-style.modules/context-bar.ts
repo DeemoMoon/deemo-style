@@ -76,7 +76,10 @@ const BAR_GLYPHS: Record<BarStyle, { filled: string; empty: string }> = {
 const BAR_EMPTY_RGB: Rgb = [90, 90, 90];
 
 /**
- * 渲染占用率色条：已占用格子按"该格子中点"取档位色，未占用为暗灰空心。
+ * 渲染占用率色条：格子的填充判定与颜色统一按"格子中点"口径——
+ * 中点 ≤ 占用率才算已占用，已占用格的颜色也按中点取档位，两者天然一致
+ * （避免"四舍五入多填一格、但该格中点却落在另一档"的边界错位）。
+ * 占用率未知（null/undefined/NaN）时所有格子都是暗灰空心。
  * 全程只用前景色，不引入背景色。
  */
 export function renderContextBar(
@@ -88,12 +91,12 @@ export function renderContextBar(
 	const glyphs = BAR_GLYPHS[style];
 	const known = typeof percent === "number" && Number.isFinite(percent);
 	const clamped = known ? Math.max(0, Math.min(100, percent)) : 0;
-	const filled = known ? Math.round((clamped / 100) * cells) : 0;
 
 	const parts: string[] = [];
 	for (let i = 0; i < cells; i++) {
+		// 填充判定与颜色同口径：都用格子中点对比占用率，不再单独四舍五入算格数
 		const midpoint = ((i + 0.5) / cells) * 100;
-		const isFilled = i < filled;
+		const isFilled = known && midpoint <= clamped;
 		const rgb = isFilled ? levelRgb(midpoint) : BAR_EMPTY_RGB;
 		parts.push(`${sgr(rgb)}${isFilled ? glyphs.filled : glyphs.empty}${RESET_FG}`);
 	}

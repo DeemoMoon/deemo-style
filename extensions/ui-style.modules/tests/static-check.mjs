@@ -81,7 +81,10 @@ function body(source) {
 	return source
 		.replace(/\/\*[\s\S]*?\*\//gu, "")
 		.replace(/(^|[^:])\/\/[^\n]*/gu, "$1")
-		.replace(/import\s+(?:type\s+)?(?:\{[^}]*\}|[^;\n]+?)\s+from\s+"[^"]+";/gu, "");
+		.replace(/import\s+(?:type\s+)?(?:\{[^}]*\}|[^;\n]+?)\s+from\s+"[^"]+";/gu, "")
+		// 展开运算符 `...name` 不是 `obj.name`：先抹掉 `...`，否则下面的
+		// `(?<![.\w$])` 会把被展开的名字误判成"没被使用"（本身是误报来源）。
+		.replace(/\.\.\./gu, "   ");
 }
 
 const problems = [];

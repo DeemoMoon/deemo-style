@@ -14,15 +14,54 @@ import { homedir } from "node:os";
 export const HOME = homedir();
 
 /**
- * 把 home 目录缩写成 `~`（大小写不敏感，Windows 友好）。
- * rest 必须为空或以路径分隔符开头：home 为 `C:\Users\x` 时不能把
- * `C:\Users\x2` 误缩成 `~/2`（formatCwd / 启动页共用）。
+ * 大小写不敏感只在大小写不敏感的文件系统上启用（Windows / macOS 默认卷）。
+ *
+ * Linux 上 `/HOME/x` 是**另一个真实目录**，按 home 缩写会显示成 `~/x` 骗人。
+ */
+const CASE_INSENSITIVE_HOME = process.platform === "win32" || process.platform === "darwin";
+
+/**
+ * 去掉 home 前缀：命中返回 rest（可能为空串），不命中返回 undefined。
+ *
+ * 两个坑在这里一起堵住：
+ *   1. **不能先 toLowerCase 再 startsWith**：`İ`.toLowerCase() 会变成 2 个码点，
+ *      拿它做长度判断再用 `path.slice(HOME.length)` 截原串就会错位；
+ *      这里改成「先按 HOME.length 切片，再比较切片本身」，长度天然对齐。
+ *   2. **大小写只在对应平台忽略**（见 CASE_INSENSITIVE_HOME），Linux 上大小写
+ *      不同就是不同目录。
+ *
+ * `caseInsensitive` 显式传入（而不是直接用常量）是为了两个分支都能单测。
+ */
+export function stripHomePrefix(
+	path: string,
+	home: string,
+	caseInsensitive: boolean,
+): string | undefined {
+	if (!home) return undefined;
+	// 去掉 home 末尾的分隔符（根目录 "/" 除外），否则 "/home/u/" 和 "/home/u" 表现不一致。
+	const base = home.length > 1 ? home.replace(/[\\/]+$/, "") : home;
+	if (path.length < base.length) return undefined;
+	const head = path.slice(0, base.length);
+	const matched = caseInsensitive ? head.toLowerCase() === base.toLowerCase() : head === base;
+	if (!matched) return undefined;
+	const rest = path.slice(base.length);
+	// home 是根目录时（base === "/"）rest 天然不带前导分隔符，直接放行。
+	if (base === "/") return rest;
+	// 其余情况 rest 必须为空或以分隔符开头：home 为 `C:\Users\x` 时不能把
+	// `C:\Users\x2` 误缩成 `~/2`。
+	return rest === "" || rest.startsWith("/") || rest.startsWith("\\") ? rest : undefined;
+}
+
+/**
+ * 把 home 目录缩写成 `~`（Windows / macOS 大小写不敏感，Linux 敏感）。
+ * `formatCwd` 与启动页共用。
  */
 export function shortenHome(path: string): string {
-	if (!HOME) return path;
-	if (!path.toLowerCase().startsWith(HOME.toLowerCase())) return path;
-	const rest = path.slice(HOME.length);
-	return rest === "" || rest.startsWith("/") || rest.startsWith("\\") ? `~${rest}` : path;
+	const rest = stripHomePrefix(path, HOME, CASE_INSENSITIVE_HOME);
+	if (rest === undefined) return path;
+	// home 是根目录时 rest 不带前导分隔符，补一个，保证缩写后仍是 `~/x` 形态。
+	if (rest === "") return "~";
+	return rest.startsWith("/") || rest.startsWith("\\") ? `~${rest}` : `~/${rest}`;
 }
 
 /** 把 home 目录缩写成 `~`，并统一成 `/`，让路径短一些（状态栏/信息面板共用）。 */

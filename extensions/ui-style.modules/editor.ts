@@ -37,6 +37,9 @@ import type { Rgb } from "./core.ts";
 const PROMPT_GLYPH_WIDTH = 1;
 const PROMPT_WIDTH = PROMPT_GLYPH_WIDTH + 1;
 
+/** 圆角框左右边框各占的列数（render 加框与 handleMouse 坐标回换算共用）。 */
+const BORDER_INSET = 1;
+
 /**
  * 转圈符号：月相 8 帧一轮（🌕🌖🌗🌘🌑🌒🌓🌔）。
  *
@@ -135,7 +138,8 @@ class RoundedEditor extends CustomEditor {
 		}
 	}
 
-	/** 始终保留左侧内边距，给箭头留位置（忽略 settings 里的 editorPaddingX）。 */
+	/** 防御性覆盖：pi-tui 当前直接读写 paddingX 字段、不经过这个方法；
+	 * 若将来 pi 改为调用 setPaddingX(settings.editorPaddingX)，这里保证内边距不被改掉。 */
 	override setPaddingX(_padding: number): void {
 		super.setPaddingX(PROMPT_WIDTH);
 	}
@@ -179,7 +183,7 @@ class RoundedEditor extends CustomEditor {
 	override render(width: number): string[] {
 		if (width < 8) return super.render(width);
 
-		const inner = super.render(width - 2);
+		const inner = super.render(width - BORDER_INSET * 2);
 		const autoHeight =
 			(this as unknown as { renderedAutocompleteHeight?: number }).renderedAutocompleteHeight ?? 0;
 		// [0] 上边框，[1..bottomIndex-1] 内容，[bottomIndex] 下边框，其后是自动补全列表
@@ -198,7 +202,7 @@ class RoundedEditor extends CustomEditor {
 				lines.push(side + (i === 1 ? this.firstContentLine(line) : line) + side);
 			} else {
 				// 自动补全列表保持在输入框下方；补 1 列缩进，与框内内容对齐
-				lines.push(` ${line}`);
+				lines.push(" ".repeat(BORDER_INSET) + line);
 			}
 		}
 		return lines;
@@ -210,8 +214,8 @@ class RoundedEditor extends CustomEditor {
 		// 自动补全列表里的点击也会偏移，窄屏下 padding 上限还会算错。
 		return super.handleMouse({
 			...event,
-			x: Math.max(0, event.x - 1),
-			width: Math.max(1, event.width - 2),
+			x: Math.max(0, event.x - BORDER_INSET),
+			width: Math.max(1, event.width - BORDER_INSET * 2),
 		});
 	}
 }

@@ -53,6 +53,7 @@ import {
 	UI_INDENT_WIDTH,
 } from "./core.ts";
 import type {
+	KeyHintFn,
 	RenderResultOptionsLike,
 	WindowSnapshot,
 	Rgb,
@@ -107,8 +108,10 @@ function cleanedTailText(raw: string, limit: number): string {
 		start = newline + 1;
 	} else {
 		// 单行文本：若切点落在一个 SGR 序列中间，回退到 ESC 起点。
+		// 最多回扫 40 字符（最长 SGR 序列也就这么长）：超出一律当作不在
+		// 序列中间，避免超长单行每次都在这里回扫整个 8KB 窗口。
 		const escape = raw.lastIndexOf("\x1b", start);
-		if (escape !== -1) {
+		if (escape !== -1 && escape >= start - 40) {
 			const end = raw.indexOf("m", escape);
 			if (end === -1 || end >= start) start = escape;
 		}
@@ -118,11 +121,18 @@ function cleanedTailText(raw: string, limit: number): string {
 
 /** partial 结果只取尾部一小段文本（省掉每次都对全量做 cleanText）。 */
 function liveOutputText(result: ToolResultLike): string {
-	const raw = result.content
-		.filter((part) => part.type === "text")
-		.map((part) => part.text ?? "")
-		.join("\n");
-	return cleanedTailText(raw, LIVE_TAIL_CHARS);
+	// 从 content 尾部倒序累加：只收够清洗余量的那一段（LIVE_TAIL_CHARS * 2），
+	// 而不是对全量做 filter+map+join——大输出下每个 partial 帧全量 join 太贵。
+	let tail = "";
+	const parts = result.content;
+	for (let i = parts.length - 1; i >= 0; i--) {
+		const part = parts[i]!;
+		if (part.type !== "text") continue;
+		tail = tail === "" ? (part.text ?? "") : `${part.text ?? ""}\n${tail}`;
+		if (tail.length >= LIVE_TAIL_CHARS * 2) break;
+	}
+	if (!tail) return "";
+	return cleanedTailText(tail, LIVE_TAIL_CHARS);
 }
 
 /**
@@ -310,6 +320,16 @@ interface EditPanelState extends PanelState {
 	/** 预计算发起/完成标记：异步计算，跑完调 context.invalidate() 重绘。 */
 	previewPending?: boolean;
 	previewDone?: boolean;
+	/** previewDiff 的按行缓存（renderCall 是高频路径，split 只在重置后算一次）。 */
+	previewLines?: string[];
+}
+
+/** args 引用变化时重置 state 上的一组字段（流式期间 pi 每次给新对象）。 */
+function resetOnArgsChange<S extends object>(state: S, args: unknown, fields: readonly (keyof S & string)[], refKey: keyof S & string): boolean {
+	if ((state as Record<string, unknown>)[refKey] === args) return false;
+	(state as Record<string, unknown>)[refKey] = args;
+	for (const field of fields) (state as Record<string, unknown>)[field] = undefined;
+	return true;
 }
 
 
@@ -449,7 +469,7 @@ type ResultView = (
 	expanded: boolean,
 	isError: boolean,
 	theme: Theme,
-	extra: { emptyLabel?: string; colorize?: (line: string) => string },
+	extra: { emptyLabel?: string; colorize?: (line: string) => string; keyHint?: KeyHintFn },
 ) => Component;
 
 const previewView: ResultView = (lines, expanded, isError, theme, extra) =>
@@ -475,12 +495,15 @@ function panelResultBody(
 	theme: Theme,
 	context: ToolRenderContextLike,
 	sourceLines: () => string[],
-	extra: { emptyLabel?: string; colorize?: (line: string) => string } = {},
+	extra: { emptyLabel?: string; colorize?: (line: string) => string; keyHint?: KeyHintFn } = {},
 	view: ResultView = previewView,
 ): Component {
 	const state = getTimerState(context) as PanelState;
 	// keyHint 走渲染上下文（用户自定义键位才显示得对）
 	const hintOptions = { ...extra, keyHint: context.keyHint };
+	// 定格耗时：和 core.ts touchClock 的定格逻辑互补——renderResult 不一定
+	// 经过 renderCall 的 touchClock，所以在这里也兜底定格一次（??= 幂等）。
+	if (!options.isPartial && state.startedAt !== undefined) state.endedAt ??= Date.now();
 
 	// 结果正文只取一次：以前展开/收起两条路径各调 1~2 次 sourceLines()，
 	// 对 1MB 输出来说每次都是一遍 split（edit 还要再 split diff）。
@@ -489,14 +512,13 @@ function panelResultBody(
 	if (options.expanded) {
 		const lines = resultLines ?? sourceLines();
 		state.resultLines = lines.length;
-		if (state.startedAt !== undefined && !options.isPartial) state.endedAt ??= Date.now();
-		return view(lines, true, context.isError, theme, extra);
+		// 展开分支要传 hintOptions：折叠提示的 "to expand" 键位要跟用户自定义走。
+		return view(lines, true, context.isError, theme, hintOptions);
 	}
 
 	// 运行中：partial 输出（bash/codemode）给实时尾窗；没有输出就让标题下的
 	// “执行中...”占位。完成后：同一块尾窗定格显示最后 3 行。
 	const text = options.isPartial ? liveOutputText(result) : (resultLines ?? []).join("\n");
-	if (state.startedAt !== undefined && !options.isPartial) state.endedAt ??= Date.now();
 	state.resultLines = options.isPartial ? 0 : (resultLines ?? []).length;
 	if (!text.trim()) {
 		state.liveOutput = false;
@@ -627,13 +649,7 @@ function editPanel(spec: PanelHeaderSpec): ToolPanelRenderer {
 			// details.diff 仍是最终显示的权威来源。这里只按 args 对象引用判断
 			// “参数集变了”：pi 每次 updateArgs 都给新对象，流式期间等于每个 token
 			// 重置一次（argsComplete 前本来也不会算 diff），比整段 stringify 便宜。
-			if (state.previewArgsRef !== args) {
-				state.previewArgsRef = args;
-				state.previewDiff = undefined;
-				state.previewError = undefined;
-				state.previewPending = undefined;
-				state.previewDone = undefined;
-			}
+			resetOnArgsChange(state, args, ["previewDiff", "previewError", "previewPending", "previewDone", "previewLines"], "previewArgsRef");
 			if (context.argsComplete && !state.previewDone && !state.previewPending) {
 				const previewInput = getPreviewInput(args);
 				if (!previewInput) {
@@ -648,7 +664,8 @@ function editPanel(spec: PanelHeaderSpec): ToolPanelRenderer {
 						state.previewPending = false;
 						state.previewDone = true;
 						if ("error" in outcome) state.previewError = outcome.error;
-						else state.previewDiff = outcome.diff;
+						// 赋值时就归一化换行：renderCall 是高频路径，不能每帧重新 replace。
+						else state.previewDiff = outcome.diff?.replace(/\r\n?/g, "\n");
 						context.invalidate();
 					});
 				}
@@ -664,7 +681,9 @@ function editPanel(spec: PanelHeaderSpec): ToolPanelRenderer {
 					? new IndentedPreviewView([state.previewError], context.expanded, true, theme)
 					: state.previewDiff !== undefined
 						? new IndentedPreviewView(
-								state.previewDiff.replace(/\r\n?/g, "\n").split("\n"),
+								// previewDiff 已在赋值时归一化；split 结果缓存到 previewLines，
+								// 避免 renderCall 高频路径上每帧重复 split 整段 diff。
+								(state.previewLines ??= state.previewDiff.split("\n")),
 								context.expanded,
 								false,
 								theme,
@@ -692,6 +711,7 @@ function editPanel(spec: PanelHeaderSpec): ToolPanelRenderer {
 				!context.isError && typeof typedResult.details?.diff === "string"
 					? typedResult.details.diff
 					: state.previewDiff;
+			// previewDiff 已归一化过；只有 details.diff 还需要兜底 replace。
 			const diff = typeof rawDiff === "string" ? rawDiff.replace(/\r\n?/g, "\n") : "";
 			const sourceText = diff || resultOutput(result);
 			if (!sourceText) {

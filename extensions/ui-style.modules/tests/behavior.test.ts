@@ -22,10 +22,13 @@ const extension = await jiti.import(fileURLToPath(new URL("../extension.ts", imp
 	default: true,
 });
 
+const { SHIMMER_PERIOD_MS } = await jiti.import("../core.ts");
+
 const handlers = new Map();
 const toolRenderers = [];
 const commands = new Map();
 const shortcuts = new Map();
+const markdownTransformers = [];
 
 /** 面板会用到的 pi 侧可变桩（测试里按需改 thinkingLevel / 记录调用）。 */
 const piStub = {
@@ -49,7 +52,9 @@ extension({
 	registerToolRenderer(resolver) {
 		toolRenderers.push(resolver);
 	},
-	registerMarkdownTransformer() {},
+	registerMarkdownTransformer(transformer) {
+		markdownTransformers.push(transformer);
+	},
 	registerCommand(name, options) {
 		commands.set(name, options);
 	},
@@ -88,6 +93,30 @@ const theme = {
 
 const strip = (text) =>
 	text.replace(/\x1b\][^\x07]*\x07/g, "").replace(/\x1b\[[0-9;]*m/g, "");
+
+/** 构造走扩展真实 markdown transformer 的用户消息（ 图标 + 加粗）。 */
+function styledUserMessage(text) {
+	return new piMain.UserMessageComponent(
+		text,
+		undefined,
+		undefined,
+		markdownTransformers,
+		`msg-${text.length}`,
+	);
+}
+
+/** 渲染后第一条非空行的纯文本。 */
+function firstVisibleLine(component, width = 80) {
+	return strip(component.render(width).join("\n"))
+		.split("\n")
+		.find((line) => line.trim() !== "") ?? "";
+}
+
+/** 图标前缀（行首控制序列之后，正文之前）：必须是 0 或 1 个空格 + \uE370 + 1 个空格。 */
+function iconPrefix(line) {
+	const m = /^(\s*)\uE370 /.exec(line);
+	return m ? m[1].length : -1;
+}
 
 function panelContext(overrides = {}) {
 	return {
@@ -310,6 +339,22 @@ test("用户消息：左移一列但总宽不变，末尾空行被删", () => {
 	assert.notEqual(strip(lines[lines.length - 1]).trim(), "");
 });
 
+test("用户消息图标 \uE370 出现在引用 / 标题标记之前（第 0 列）", () => {
+	// 图标插在块级前缀之前：屏幕上永远只偏 0~1 列（pi 的 Markdown 渲染会给
+	// 段落加缩进），且不会落到 > / # 之后（否则会被算进引用块/标题内容）。
+	// 注：pi 渲染 blockquote 时把 > 换成 │；h1/h2 的 # 标记会被 pi 的
+	// markdown 主题吞掉（只保留标题文字），h3 才原样保留 "###"。
+	const cases = [
+		["> 引用内容", "│ 引用内容"],
+		["# 标题", "标题"],
+	];
+	for (const [text, rendered] of cases) {
+		const line = firstVisibleLine(styledUserMessage(text));
+		assert.ok(iconPrefix(line) <= 1, `「${text}」图标应在行首 0~1 列：${JSON.stringify(line)}`);
+		assert.ok(line.includes(rendered), `「${text}」应渲染出内容：${JSON.stringify(line)}`);
+	}
+});
+
 test("技能横幅：折叠 4 行预览，展开显示全部", () => {
 	const banner = new piMain.SkillInvocationMessageComponent({
 		name: "demo",
@@ -496,7 +541,7 @@ test("扫光：运行中的面板标题在多色之间往返，结束后恢复�
 		const call = panel.renderCall(args, theme, running);
 		const first = call.render(80)[0] ?? "";
 
-		Date.now = () => 10_350; // 相位 0.5：亮带扫到中间
+		Date.now = () => 10_000 + SHIMMER_PERIOD_MS / 2; // 相位 1：亮带扫到最右
 		const middle = call.render(80)[0] ?? "";
 		assert.notEqual(first, middle, "标题应随帧重画（否则缓存把动画停住了）");
 		assert.ok(
@@ -506,7 +551,7 @@ test("扫光：运行中的面板标题在多色之间往返，结束后恢复�
 		assert.equal(strip(middle).includes("Bash"), true);
 
 		// 再过一个完整周期：相位回到 0，首个字符的亮色应恢复
-		Date.now = () => 11_400;
+		Date.now = () => 10_000 + SHIMMER_PERIOD_MS;
 		const again = call.render(80)[0] ?? "";
 		const headColors = (line) => [...line.matchAll(/\x1b\[38;2;(\d+);(\d+);(\d+)m/g)].map((m) => m[0]);
 		assert.equal(headColors(again)[0], headColors(first)[0], "相位回到起点时首个字符颜色应一致");
@@ -1787,4 +1832,1070 @@ test("状态栏缓存命中率：有缓存数据时必须渲染成功，且越�
 	// 降饱和绿色 rgb(126;180;120)；红色是 228;122;110
 	assert.ok(lines.join("").includes("38;2;126;180;120"), "90% 命中应着绿色");
 	assert.ok(!lines.join("").includes("38;2;228;122;110"), "不该出现红色");
+});
+
+// ---------------------------------------------------------------------------
+// subagent 面板：单个 / 并行 / 链式
+// ---------------------------------------------------------------------------
+
+/** subagent 工具的 details 样本（与 pi 自带 subagent 扩展的 SingleResult 同形）。 */
+function subagentDetails(mode, results) {
+	return { mode, results, isError: false };
+}
+
+function subagentChild(overrides = {}) {
+	return {
+		agent: "reviewer",
+		agentSource: "user",
+		task: "审查 panels.ts",
+		status: "completed",
+		exitCode: 0,
+		messages: [
+			{ role: "user", content: [{ type: "text", text: "审查 panels.ts" }] },
+			{
+				role: "assistant",
+				thinkingLevel: "high",
+				content: [
+					{ type: "text", text: "先看文件结构" },
+					{ type: "toolCall", name: "read" },
+					{ type: "text", text: "发现两处问题" },
+				],
+			},
+		],
+		stderr: "",
+		usage: { input: 1200, output: 340, cacheRead: 800, cacheWrite: 0, cost: 0.02 },
+		model: "claude-sonnet-4",
+		...overrides,
+	};
+}
+
+test("subagent 面板：单个/并行/链式都能渲染，且窄终端不超宽", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	// 找 subagent 的渲染器（resolvePanel 是第一个 resolver，这里单独查表）
+	let resolver;
+	const fakePi = {
+		registerToolRenderer(fn) {
+			resolver = fn;
+		},
+	};
+	registerSubagentPanel(fakePi);
+	assert.ok(resolver, "没注册渲染器");
+	assert.equal(resolver("bash", () => undefined), undefined, "别的工具应交还给 pi");
+	const panel = resolver("subagent", () => undefined);
+	assert.ok(panel, "subagent 应有渲染器");
+	assert.equal(panel.renderShell, "self");
+
+	const cases = [
+		["single", [subagentChild()]],
+		["parallel", [subagentChild(), subagentChild({ agent: "worker", status: "running" })]],
+		[
+			"chain",
+			[
+				subagentChild({ step: 1 }),
+				subagentChild({ agent: "worker", step: 2, status: "failed", errorMessage: "失败" }),
+			],
+		],
+	];
+
+	for (const [mode, results] of cases) {
+		const result = {
+			content: [{ type: "text", text: "最终输出" }],
+			details: subagentDetails(mode, results),
+		};
+		for (const width of [1, 2, 4, 10, 20, 40, 80, 200]) {
+			for (const isPartial of [false, true]) {
+				const context = panelContext({ args: { agent: "reviewer", task: "审查" }, isPartial });
+				const components = [
+					panel.renderCall(context.args, theme, context),
+					panel.renderResult(result, { expanded: false, isPartial }, theme, context),
+				];
+				for (const component of components) {
+					for (const line of component.render(width)) {
+						assert.ok(!line.includes("\n"), `${mode} width=${width} 内嵌换行`);
+						assert.ok(
+							visibleWidth(line) <= width,
+							`${mode} width=${width} 行宽 ${visibleWidth(line)} 超宽`,
+						);
+					}
+				}
+			}
+		}
+	}
+});
+
+test("subagent 面板：标题格式（单个/并行/链式）与子代理块结构", async () => {
+	const {
+		registerSubagentPanel,
+		panelTitle,
+		statusIcon,
+		cacheHitRate,
+		childThinkingLevel,
+		childModel,
+		childFooterText,
+		childHeaderText,
+		displayItems,
+		parallelStatusText,
+	} = await import("../subagent-panel.ts");
+
+	// 状态图标
+	assert.equal(statusIcon("completed").glyph, "✓");
+	assert.equal(statusIcon("failed").glyph, "✗");
+	assert.equal(statusIcon("aborted").glyph, "✗");
+	assert.equal(statusIcon("running").glyph, "⏳");
+	assert.equal(statusIcon("pending").glyph, "⏳");
+
+	// 缓存命中率：cacheRead 800 / (1200 + 800 + 0) = 40%
+	assert.equal(
+		Math.round(cacheHitRate({ input: 1200, cacheRead: 800, cacheWrite: 0, output: 1, cost: 0 })),
+		40,
+	);
+	// 没有缓存读写 → undefined（显示 --，不误报 0%）
+	assert.equal(cacheHitRate({ input: 1200, cacheRead: 0, cacheWrite: 0, output: 1, cost: 0 }), undefined);
+
+	const child = subagentChild();
+	assert.equal(childThinkingLevel(child.messages), "high");
+	assert.equal(childModel(child), "claude-sonnet-4");
+	// details.model 缺失时退回 messages 里的 model
+	assert.equal(childModel({ ...child, model: undefined, messages: [{ ...child.messages[1], model: "gpt-x" }] }), "gpt-x");
+
+	// display items：只看 assistant（user 消息不算）
+	const items = displayItems(child.messages);
+	assert.equal(items.length, 3, `应抽到 2 text + 1 toolCall，实际 ${items.length}`);
+	assert.equal(items[0].type, "text");
+	assert.equal(items[1].type, "toolCall");
+	assert.equal(items[1].name, "read");
+
+	// 底行五段：in / out / 模型 / 思考 / 缓存
+	const footer = strip(childFooterText(child));
+	assert.match(footer, /1\.2k/);
+	assert.match(footer, /340/);
+	assert.match(footer, /claude-sonnet-4/);
+	assert.match(footer, /high/);
+	assert.match(footer, /40\.0%/);
+
+	// 子代理块标题：图标 + ✓ + 名称 + 耗时；链式带步骤编号
+	const clock = { startedAt: Date.now() - 1500, endedAt: Date.now() };
+	const header = strip(childHeaderText(child, clock));
+	assert.ok(header.includes("\uF4BE"), "子代理块标题应带 \uF4BE");
+	assert.match(header, /✓ reviewer/);
+	assert.match(header, /1\.5s/);
+	const stepHeader = strip(childHeaderText({ ...child, step: 2 }, clock));
+	assert.match(stepHeader, /2\. \uF4BE/, `链式应带步骤编号：${stepHeader}`);
+
+	// 面板标题
+	const single = strip(panelTitle("single", [child], clock, false));
+	assert.match(single, /子代理 · reviewer/, `单个标题应带子代理名称：${single}`);
+	assert.match(single, /1\.5s/, `单个标题应带耗时：${single}`);
+	const parallel = strip(panelTitle("parallel", [child, child], clock, false));
+	assert.match(parallel, /并行 · 2 个任务/);
+	const chain = strip(panelTitle("chain", [child, child, child], clock, false));
+	assert.match(chain, /链式 · 共 3 步/);
+	// 图标码位
+	assert.ok(parallel.includes("\uEE0D"), "并行标题应使用 \uEE0D");
+	assert.ok(single.includes("\uF4BE"), "单个标题应使用 \uF4BE");
+	assert.ok(chain.includes("\uF4BE"), "链式标题应使用 \uF4BE");
+
+	// 并行状态行
+	assert.match(parallelStatusText([child, child]), /2\/2 完成/);
+	assert.match(
+		parallelStatusText([
+			child,
+			subagentChild({ status: "running" }),
+			subagentChild({ status: "pending" }),
+			subagentChild({ status: "failed" }),
+		]),
+		/2\/4 完成, 1 运行, 1 待处理, 1 失败/,
+	);
+});
+
+test("subagent 面板 renderCall：并行按子代理逐个显示（标题带 agent 名与耗时）", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	// renderCall 在参数流式阶段（还没有 details）
+	const bare = panel
+		.renderCall({ tasks: [{ agent: "reviewer" }] }, theme, panelContext({ isPartial: true }))
+		.render(100)
+		.map(strip);
+	// 骨架标题从 args 推出模式与数量（这里是 parallel → \uEE0D 图标）
+	assert.match(bare.join("\n"), /子代理 · 并行 · 1 个任务/, `骨架应带模式与数量：${bare.join("\n")}`);
+	assert.ok(bare.join("").includes("\uEE0D"), "并行骨架应使用 \uEE0D");
+	// 单个模式用 \uF4BE 并带 agent 名
+	const singleSkeleton = panel
+		.renderCall({ agent: "reviewer", task: "审查" }, theme, panelContext({ isPartial: true }))
+		.render(100)
+		.map(strip)
+		.join("\n");
+	assert.match(singleSkeleton, /子代理 · reviewer/);
+	assert.ok(singleSkeleton.includes("\uF4BE"), "单个骨架应使用 \uF4BE");
+	// 链式骨架带步数
+	const chainSkeleton = panel
+		.renderCall({ chain: [{ agent: "a" }, { agent: "b" }, { agent: "c" }] }, theme, panelContext({ isPartial: true }))
+		.render(100)
+		.map(strip)
+		.join("\n");
+	assert.match(chainSkeleton, /链式 · 共 3 步/);
+
+	// 执行中：details 通过 partial result 推送
+	const result = {
+		content: [{ type: "text", text: "" }],
+		details: subagentDetails("parallel", [
+			subagentChild({ agent: "reviewer" }),
+			subagentChild({ agent: "worker", status: "running" }),
+		]),
+	};
+	const callCtx = panelContext({ isPartial: true, args: { tasks: [{ agent: "reviewer" }, { agent: "worker" }] } });
+	const lines = panel
+		.renderResult(result, { expanded: false, isPartial: true }, theme, callCtx)
+		.render(100)
+		.map(strip);
+	const text = lines.join("\n");
+	// 两个子代理各自一行标题（\uF4BE 图标 + 名称 + 状态标记）
+	assert.match(text, /\uF4BE reviewer · /, `reviewer 应有块标题：\n${text}`);
+	assert.match(text, /\uF4BE worker · /, `worker 应有块标题：\n${text}`);
+	// 每块都带任务行（黄色「」）与底行
+	assert.match(text, /「审查 panels\.ts」/);
+	// 执行内容与底行都出现
+	assert.match(text, /发现两处问题/);
+	assert.match(text, /→ read/);
+	assert.match(text, /claude-sonnet-4/);
+	// 底行带缓存命中率
+	assert.match(text, /40\.0%/);
+	// 每个子代理的滚动内容不超过 4 行
+	const reviewerBlock = lines.slice(lines.findIndex((l) => l.includes("reviewer")));
+	assert.ok(reviewerBlock.length > 0);
+});
+
+test("subagent 面板 renderResult：单个完成态显示结论（头 4 行）+ 过程一行摘要", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	// 结论 8 行（第 1 行是"结论"标题，第 8 行是细节），加 3 次工具调用
+	const conclusion = [
+		"结论：SHIMMER_PERIOD_MS 现在是 2800ms。",
+		"它只影响扫光相位计算。",
+		"第三行",
+		"第四行",
+		"第五行",
+		"第六行",
+		"第七行",
+		"第八行细节",
+	].join("\n");
+	const tools = [
+		{ type: "toolCall", name: "read" },
+		{ type: "toolCall", name: "grep" },
+		{ type: "toolCall", name: "bash" },
+	];
+	const child = subagentChild({
+		messages: [{ role: "assistant", thinkingLevel: "high", content: [...tools, { type: "text", text: conclusion }] }],
+	});
+	const result = {
+		content: [{ type: "text", text: conclusion }],
+		details: subagentDetails("single", [child]),
+	};
+	const state = { startedAt: Date.now() - 5000 };
+	const body = panel
+		.renderResult(result, { expanded: false, isPartial: false }, theme, panelContext({ state }))
+		.render(100)
+		.map(strip);
+
+	const text = body.join("\n");
+	// 看头部：前 4 行结论都在，第 5 行之后不显示
+	assert.match(text, /结论：SHIMMER_PERIOD_MS 现在是 2800ms。/, `应显示结论首行：\n${text}`);
+	assert.match(text, /第四行/, "应显示第 4 行");
+	assert.doesNotMatch(text, /第五行/, "折叠态不该显示第 5 行");
+	assert.match(text, /还有 4 行/, `应提示还有 4 行：\n${text}`);
+	// 过程只留一行摘要
+	assert.match(text, /3 次工具调用/, "应有过程摘要");
+	assert.doesNotMatch(text, /→ read/, "折叠态不该列出具体工具调用");
+	// 高度：4 行结论 + 1 行还有N行 + 1 行摘要 + 1 行底行 = 7 行
+	assert.equal(body.length, 7, `折叠态应固定 7 行，实际 ${body.length}：\n${body.join("\n")}`);
+	assert.match(body[body.length - 1], /40\.0%/, "最后一行应是 usage 底行");
+
+	// 展开：完整结论 + 过程列表
+	const expanded = panel
+		.renderResult(result, { expanded: true, isPartial: false }, theme, panelContext({ state }))
+		.render(100)
+		.map(strip)
+		.join("\n");
+	assert.match(expanded, /第八行细节/, "展开态应显示完整结论");
+	assert.match(expanded, /→ read/, "展开态应显示工具调用过程");
+});
+
+test("subagent 面板 renderResult：失败态显示错误证据行", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	const state = { startedAt: Date.now() - 4600 };
+	const failed = {
+		content: [{ type: "text", text: "" }],
+		details: subagentDetails("single", [subagentChild({ status: "failed", errorMessage: "子代理超时" })]),
+	};
+	const body = panel
+		.renderResult(failed, { expanded: false, isPartial: false }, theme, panelContext({ state }))
+		.render(100)
+		.map(strip);
+	assert.match(body.join("\n"), /子代理超时/);
+
+	// 标题用缓存下来的失败标记（不能显示成 ✓）
+	const title = strip(
+		panel.renderCall({ agent: "reviewer" }, theme, panelContext({ state })).render(100)[0] ?? "",
+	);
+	assert.match(title, /✗/, `失败时标题必须是 ✗：${title}`);
+	assert.doesNotMatch(title, /✓/, `失败时标题不该出现 ✓：${title}`);
+});
+
+test("subagent 面板 renderResult：并行/链式显示状态行 + 每个任务自己的结论", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	const mk = (agent, text, o = {}) =>
+		subagentChild({
+			agent,
+			messages: [{ role: "assistant", content: [{ type: "toolCall", name: "read" }, { type: "text", text }] }],
+			...o,
+		});
+
+	// 并行：每个任务各自的结论（不能把拼接后的 result.content 塞给每个块）
+	const parallel = {
+		content: [{ type: "text", text: "Parallel: 2/2 succeeded\n\n### [reviewer] completed\n\n...\n\n---\n\n### [worker] completed\n\n..." }],
+		details: subagentDetails("parallel", [mk("reviewer", "reviewer 的结论"), mk("worker", "worker 的结论")]),
+	};
+	const text = panel
+		.renderResult(parallel, { expanded: false, isPartial: false }, theme, panelContext({ state: { startedAt: Date.now() - 3000 } }))
+		.render(100)
+		.map(strip)
+		.join("\n");
+
+	// 完成态：● 打满 + 进度 + 汇总（同一行）
+	assert.equal((text.match(/●/g) ?? []).length, 2, `完成态应有两个 ●：\n${text}`);
+	assert.match(text, /2\/2 完成 · in [\d.]+k? · out [\d.]+k? · cache [\d.]+%/);
+	// 不再用 ─── 分隔线，每块是自己的标题（\uF4BE 名称 · 耗时 · ✓）
+	assert.match(text, /\uF4BE reviewer · [^\n]*✓/, `reviewer 块标题：\n${text}`);
+	assert.match(text, /\uF4BE worker · [^\n]*✓/, `worker 块标题：\n${text}`);
+	assert.match(text, /reviewer 的结论/, "应显示 reviewer 自己的结论");
+	assert.match(text, /worker 的结论/, "应显示 worker 自己的结论");
+	assert.doesNotMatch(text, /→ read/, "折叠态不该列出工具调用");
+	assert.doesNotMatch(text, /^\s*Total\b/m, "不再有独立的 Total 行");
+
+	// 链式：带 Step 编号
+	const chain = {
+		content: [{ type: "text", text: "最终结论" }],
+		details: subagentDetails("chain", [
+			mk("planner", "第一步结论", { step: 1 }),
+			mk("worker", "第二步结论", { step: 2 }),
+		]),
+	};
+	const chainText = panel
+		.renderResult(chain, { expanded: false, isPartial: false }, theme, panelContext({ state: { startedAt: Date.now() - 3000 } }))
+		.render(100)
+		.map(strip)
+		.join("\n");
+	assert.match(chainText, /2\/2 步完成/);
+	// 链式只显示"当前这一步"：都结束后显示最后一步，并且保留步骤编号
+	assert.match(chainText, /2\. \uF4BE worker · [^\n]*✓/, `链式应显示最后一步：\n${chainText}`);
+	assert.doesNotMatch(chainText, /1\. \uF4BE planner/, `不该同时显示第 1 步：\n${chainText}`);
+	assert.match(chainText, /第二步结论/);
+	assert.match(chainText, /还有 1 步/, `链式应提示"还有 N 步"：\n${chainText}`);
+});
+
+test("subagent 面板：拿不到 details 时退化成一行文本，不崩", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+	const view = panel.renderResult(
+		{ content: [{ type: "text", text: "纯文本结果" }] },
+		{ expanded: false, isPartial: false },
+		theme,
+		panelContext(),
+	);
+	const lines = view.render(80).map(strip).filter((line) => line.trim() !== "");
+	assert.ok(lines.length > 0, "应至少渲染一行");
+	assert.match(lines.join("\n"), /纯文本结果/);
+});
+
+test("subagent 面板：单个运行中不做两级结构，且标题不重复", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	const result = {
+		content: [{ type: "text", text: "" }],
+		details: subagentDetails("single", [subagentChild({ status: "running" })]),
+	};
+	const state = { startedAt: Date.now() - 3000 };
+	const ctx = panelContext({ isPartial: true, state });
+
+	// pi 里 call 区与 result 区是两个独立子组件，两块会拼在一起显示
+	const callLines = panel
+		.renderCall({ agent: "reviewer", task: "审查 panels.ts" }, theme, ctx)
+		.render(96)
+		.map(strip);
+	const bodyLines = panel
+		.renderResult(result, { expanded: false, isPartial: true }, theme, ctx)
+		.render(96)
+		.map(strip);
+	const all = [...callLines, ...bodyLines];
+
+	// 1) 标题只能在 call 区出现一次
+	const titleLines = all.filter((line) => /子代理 · reviewer/.test(line));
+	assert.equal(titleLines.length, 1, `标题必须只出现一次，实际 ${titleLines.length} 次`);
+	assert.match(callLines[0], /子代理 · reviewer/, `首行应是标题：${callLines[0]}`);
+	// 2) 运行中标题以 󰈑 结尾
+	assert.ok(callLines[0].includes("\uDB80\uDE11"), `运行中标题应以 󰈑 结尾：${callLines[0]}`);
+	// 3) 任务行在 call 区，且只出现一次
+	assert.match(callLines[1], /⎿/, `call 区第二行应是任务行：${callLines[1]}`);
+	assert.equal(all.filter((line) => /审查 panels\.ts/.test(line)).length, 1, "任务行只应出现一次");
+	// 4) 流式输出不再自带 ⎿
+	for (const line of bodyLines.slice(0, -1)) {
+		assert.doesNotMatch(line, /⎿/, `流式输出行不该再带 ⎿：${line}`);
+	}
+	// 5) 底行五段齐全、无思考/缓存图标
+	const last = bodyLines[bodyLines.length - 1];
+	assert.match(last, /1\.2k/);
+	assert.match(last, /claude-sonnet-4/);
+	assert.match(last, /high/);
+	assert.match(last, /40\.0%/);
+	assert.ok(!last.includes("\uE263"), "底行不该有思考图标");
+	assert.ok(!last.includes("\uF52E"), "底行不该有缓存图标");
+});
+
+test("subagent 面板：并行运行中仍保留每个子代理的分组标题", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	const result = {
+		content: [{ type: "text", text: "" }],
+		details: subagentDetails("parallel", [
+			subagentChild({ agent: "reviewer", status: "running" }),
+			subagentChild({ agent: "worker", status: "running" }),
+		]),
+	};
+	const state = { startedAt: Date.now() - 3000 };
+	const ctx = panelContext({ isPartial: true, state });
+	const callText = panel
+		.renderCall({ tasks: [{ agent: "reviewer" }, { agent: "worker" }] }, theme, ctx)
+		.render(96)
+		.map(strip)
+		.join("\n");
+	const text = panel
+		.renderResult(result, { expanded: false, isPartial: true }, theme, ctx)
+		.render(96)
+		.map(strip)
+		.join("\n");
+
+	assert.match(callText, /子代理 · 并行 · 2 个任务/);
+	assert.doesNotMatch(text, /子代理 · 并行/, "result 区不该重复画标题");
+	// 子代理块标题不再画 ⎿（只留等宽缩进），所以断言"缩进 + 图标 + 名称 ·"
+	const headers = text.match(/^\s+\uF4BE\s+(reviewer|worker)\s+·/gm) ?? [];
+	assert.equal(headers.length, 2, `并行应有 2 个子代理标题：\n${text}`);
+	assert.doesNotMatch(text, /⎿\s+\uF4BE/, "块标题不该再带 ⎿");
+});
+
+test("subagent 面板：状态标记（󰈑 / ✓ / ✗）是静态字形，颜色比标题暗", async () => {
+	const { statusMark, statusMarkText, statusMarkGlyph, ACCENT_SUBAGENT } = await import(
+		"../subagent-data.ts"
+	);
+
+	const running = statusMark([subagentChild({ status: "running" })], true);
+	assert.equal(running.kind, "running");
+	const runningText = statusMarkText(running);
+	const rgb = /38;2;(\d+);(\d+);(\d+)/.exec(runningText);
+	assert.ok(rgb, `执行中标记应有 24-bit 颜色：${runningText}`);
+	const [r, g, b] = rgb.slice(1).map(Number);
+	assert.ok(b > r, `应是蓝色系：${r},${g},${b}`);
+	const lum = (x, y, z) => 0.299 * x + 0.587 * y + 0.114 * z;
+	assert.ok(lum(r, g, b) < lum(...ACCENT_SUBAGENT) - 10, "标记应比标题暗");
+	assert.notDeepEqual([r, g, b], [227, 179, 65], "不能是原来的警告黄");
+
+	assert.equal(statusMarkGlyph(running), "\uDB80\uDE11");
+	assert.equal(visibleWidth(statusMarkGlyph(running)), 1);
+	const same = [0, 450, 900, 100000].map(() => statusMarkText(running));
+	assert.equal(new Set(same).size, 1, "执行中标记必须与时间无关（静态）");
+
+	assert.equal(statusMark([subagentChild({ status: "completed" })], false).kind, "ok");
+	assert.equal(statusMark([subagentChild({ status: "failed" })], false).kind, "fail");
+	assert.equal(statusMark([subagentChild({ status: "aborted" })], false).kind, "fail");
+	assert.match(strip(statusMarkText({ kind: "ok" })), /✓/);
+	assert.match(strip(statusMarkText({ kind: "fail" })), /✗/);
+});
+
+test("subagent 面板：任务描述换行显示完整（不截断）", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	const task =
+		"在 /home/sunqiulei/Pi开发/deemo-style/extensions/ui-style.modules 里，统计两个文件各有多少行，" +
+		"并说一句话说明这两个文件的分工。纯文本回答，不要表格。";
+	const ctx = panelContext({ isPartial: true, state: { startedAt: Date.now() - 3000 } });
+	const lines = panel.renderCall({ agent: "scout", task }, theme, ctx).render(70).map(strip);
+
+	const body = lines.slice(1);
+	assert.ok(body.length >= 2, `长任务应折成多行，实际 ${body.length} 行`);
+	assert.match(body[0], /⎿/);
+	for (const line of body.slice(1)) assert.doesNotMatch(line, /⎿/);
+
+	const joined = body.join("").replace(/\s+/g, "");
+	assert.ok(joined.includes("在/home/sunqiulei"), "任务开头应完整");
+	assert.ok(joined.includes("不要表格。"), "任务结尾应完整（不能截断）");
+});
+
+test("subagent 面板：跑完标题必须显示 ✓（不能停在 󰈑）", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	// 模拟 pi 的真实顺序：两个工厂都先跑、之后才 render
+	const doneState = { startedAt: Date.now() - 4600 };
+	const doneCtx = panelContext({ isPartial: false, state: doneState });
+	const done = {
+		content: [{ type: "text", text: "ok" }],
+		details: subagentDetails("single", [subagentChild({ status: "completed" })]),
+	};
+	const doneCall = panel.renderCall({ agent: "scout", task: "t" }, theme, doneCtx);
+	const doneRes = panel.renderResult(done, { expanded: false, isPartial: false }, theme, doneCtx);
+	const doneTitle = strip(doneCall.render(80)[0]);
+	doneRes.render(80);
+	assert.match(doneTitle, /✓/, `完成帧标题应显示 ✓：${doneTitle}`);
+	assert.ok(!doneTitle.includes("\uDB80\uDE11"), "完成帧不该还在显示 󰈑");
+
+	const failState = { startedAt: Date.now() - 4600 };
+	const failCtx = panelContext({ isPartial: false, state: failState });
+	const fail = {
+		content: [{ type: "text", text: "" }],
+		details: subagentDetails("single", [subagentChild({ status: "failed", errorMessage: "超时" })]),
+	};
+	const failCall = panel.renderCall({ agent: "scout" }, theme, failCtx);
+	const failRes = panel.renderResult(fail, { expanded: false, isPartial: false }, theme, failCtx);
+	const failTitle = strip(failCall.render(80)[0]);
+	failRes.render(80);
+	assert.match(failTitle, /✗/, `失败帧标题应显示 ✗：${failTitle}`);
+});
+
+test("subagent 面板：运行中的高光覆盖到状态标记 󰈑", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	const ctx = panelContext({ isPartial: true, state: { startedAt: Date.now() - 1000 } });
+	const raw = panel.renderCall({ agent: "scout", task: "t" }, theme, ctx).render(80)[0];
+
+	// shimmerText 逐字符着色：SGR 段数应等于扫光文本的字符数（行首缩进在扫光外）
+	const body = raw.replace(/^ +/, "");
+	assert.equal(
+		(body.match(/38;2;/g) ?? []).length,
+		Array.from(strip(body)).length,
+		`每个可见字符都应被单独着色（含 󰈑）：${JSON.stringify(strip(body))}`,
+	);
+	// 字形后面不该再有独立配色（那说明它被拼在扫光之外）
+	const tail = raw.slice(raw.lastIndexOf("\uDB80\uDE11"));
+	assert.doesNotMatch(tail, /38;2;(71|47|186);/, `标记后面不该再有独立配色：${JSON.stringify(tail)}`);
+});
+
+test("subagent 面板：任务描述用「」包裹并着黄色", async () => {
+	const { registerSubagentPanel, TASK_TEXT_RGB, TASK_WRAP_OPEN, TASK_WRAP_CLOSE } = await import(
+		"../subagent-panel.ts"
+	);
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	const task = "在某个目录里确认一个常量的值，用纯文本回答，不要表格。";
+	const ctx = panelContext({ isPartial: true, state: { startedAt: Date.now() - 3000 } });
+	const lines = panel
+		.renderCall({ agent: "scout", task }, theme, ctx)
+		.render(40)
+		.map(strip);
+
+	// 第二行起是任务描述：首行以「开头，末行以」结尾
+	const taskLines = lines.slice(1).filter((line) => line.trim() !== "");
+	assert.ok(taskLines.length >= 1, "应有任务行");
+	assert.ok(
+		taskLines[0].includes(TASK_WRAP_OPEN),
+		`任务首行应带开引号「：${taskLines[0]}`,
+	);
+	assert.ok(
+		taskLines[taskLines.length - 1].includes(TASK_WRAP_CLOSE),
+		`任务末行应带闭引号」：${taskLines[taskLines.length - 1]}`,
+	);
+	// 包裹的内容必须完整（折行不丢字）
+	const joined = taskLines.join("").replace(/\s+/g, "");
+	assert.ok(joined.includes("在某个目录里确认一个常量的值"), "任务内容应完整");
+	assert.ok(joined.includes("不要表格。"), "任务结尾应完整");
+
+	// 续行必须对齐到「后面的第一个字（不是对齐到「）。注意「是全角，占 2 列。
+	if (taskLines.length >= 2) {
+		const openWidth = visibleWidth(TASK_WRAP_OPEN);
+		const bracketCol = visibleWidth(taskLines[0].slice(0, taskLines[0].indexOf(TASK_WRAP_OPEN)));
+		const firstCharCol = bracketCol + openWidth;
+		for (const line of taskLines.slice(1)) {
+			const contCol = line.length - line.trimStart().length;
+			assert.equal(
+				contCol,
+				firstCharCol,
+				`续行应缩进到第 ${firstCharCol} 列（对齐任务首字），实际 ${contCol}：${JSON.stringify(line)}`,
+			);
+		}
+	}
+
+	// 颜色是黄色：R 与 G 都明显高于 B，且 R 最大
+	const [r, g, b] = TASK_TEXT_RGB;
+	assert.ok(r > b && g > b, `应是黄色（RGB 两个分量都高于蓝）：${r},${g},${b}`);
+	assert.ok(r >= g, `黄色应 R ≥ G：${r},${g},${b}`);
+
+	// 渲染出来的任务行必须真的带上这个颜色
+	const raw = panel.renderCall({ agent: "scout", task }, theme, ctx).render(40);
+	const rawTask = raw[1] ?? "";
+	assert.deepEqual(
+		/38;2;(\d+);(\d+);(\d+)/.exec(rawTask)?.slice(1).map(Number),
+		[...TASK_TEXT_RGB],
+		`任务行应使用 TASK_TEXT_RGB：${JSON.stringify(rawTask)}`,
+	);
+});
+
+test("subagent 面板：任意终端宽度下任务描述都不会被兜底截断（一个字都不丢）", async () => {
+	const { registerSubagentPanel, TASK_WRAP_OPEN, TASK_WRAP_CLOSE } = await import(
+		"../subagent-panel.ts"
+	);
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	const task =
+		"在 /home/sunqiulei/Pi开发/deemo-style/extensions/ui-style.modules 里，确认一个常量的值，" +
+		"并说明它控制什么。纯文本回答，不要表格，不要分析，也不要改代码。";
+	const ctx = panelContext({ isPartial: true, state: { startedAt: Date.now() - 3000 } });
+	const norm = (text) => text.replace(/\s+/g, "");
+
+	for (const width of [20, 25, 30, 40, 60, 80, 120]) {
+		const lines = panel
+			.renderCall({ agent: "scout", task }, theme, ctx)
+			.render(width)
+			.map(strip);
+		// 标题之后都是任务描述
+		const body = lines.slice(1);
+		assert.ok(body.length > 0, `width=${width} 应有任务行`);
+		// 去掉行首前缀（缩进空格 + ⎿ 连接符）后拼起来，必须与「+原文+」完全一致
+		// （兜底截断会吃掉尾字，拼起来就会对不上）
+		const joined = norm(body.map((line) => line.replace(/^[\s⎿]+/, "")).join(""));
+		assert.equal(
+			joined,
+			norm(`${TASK_WRAP_OPEN}${task}${TASK_WRAP_CLOSE}`),
+			`width=${width} 任务描述被截断：\n${body.join("\n")}`,
+		);
+		// 每行都不超宽
+		for (const line of lines) {
+			assert.ok(
+				visibleWidth(line) <= width,
+				`width=${width} 行宽 ${visibleWidth(line)} 超宽：${JSON.stringify(line)}`,
+			);
+		}
+	}
+});
+
+test("subagent 面板：并行运行中必须显示进度（已完成 N / 共 M）", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	const mk = (agent, status) => subagentChild({ agent, status });
+	const result = {
+		content: [{ type: "text", text: "" }],
+		details: subagentDetails("parallel", [
+			mk("a", "completed"),
+			mk("b", "running"),
+			mk("c", "pending"),
+		]),
+	};
+	const ctx = panelContext({ isPartial: true, state: { startedAt: Date.now() - 5000 } });
+	const lines = panel
+		.renderResult(result, { expanded: false, isPartial: true }, theme, ctx)
+		.render(100)
+		.map(strip);
+
+	// 运行中第一行（块顶部）就是进度：●已完成 / ○未完成 + 运行/待处理数
+	const first = lines[0] ?? "";
+	assert.equal(
+		(first.match(/●/g) ?? []).length,
+		1,
+		`1 个已完成应有 1 个 ●：${first}`,
+	);
+	// 未完成的 2 个都用空心 ○（执行中靠黄色区分，不再用 ◑）
+	assert.equal(
+		(first.match(/○/g) ?? []).length,
+		2,
+		`2 个未完成应有 2 个 ○：${first}`,
+	);
+	assert.equal((first.match(/●/g) ?? []).length, 1, `只有 1 个已完成 ●：${first}`);
+
+	assert.match(first, /1 运行中/, `应显示运行中数量：${first}`);
+	assert.match(first, /1 待处理/, `应显示待处理数量：${first}`);
+	// 运行中不显示 token 汇总（数字还在涨，会一直跳）
+	assert.doesNotMatch(first, /cache/, `运行中不该有缓存汇总：${first}`);
+	// 不再使用沙漏图标
+	assert.ok(!first.includes("⏳"), `运行中不该再出现沙漏：${first}`);
+	// 进度行在块之前（每块标题在其后）
+	assert.match(lines.join("\n"), /●[\s\S]*\uF4BE a/, "进度行应在子代理块之前");
+});
+
+test("subagent 面板：进度点只两种字形（●实心/○空心），四种状态靠颜色区分", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	const mk = (agent, status) => subagentChild({ agent, status });
+	const results = [
+		mk("a", "completed"),
+		mk("b", "failed"),
+		mk("c", "running"),
+		mk("d", "pending"),
+	];
+	const render = (isPartial, width = 100) =>
+		panel
+			.renderResult(
+				{ content: [{ type: "text", text: "" }], details: subagentDetails("parallel", results) },
+				{ expanded: false, isPartial },
+				theme,
+				panelContext({ isPartial, state: { startedAt: Date.now() - 5000 } }),
+			)
+			.render(width)[0] ?? "";
+
+	const line = render(true);
+	const plain = strip(line);
+
+	// 只有 ○ 和 ● 两种字形，不允许出现 ◑（半实心，字重不一致）或 emoji
+	assert.ok(!plain.includes("◑"), `不该再用 ◑（比 ●/○ 大）：${plain}`);
+	assert.ok(!line.includes("\u26AA"), `不该用 emoji 圆点：${plain}`);
+	for (const glyph of ["●", "○"]) {
+		assert.equal(visibleWidth(glyph), 1, `${glyph} 必须是 1 列宽`);
+	}
+
+	// 实心 = 已结束（2 个），空心 = 未结束（2 个）
+	assert.equal((plain.match(/●/g) ?? []).length, 2, `2 个已结束应有 2 个 ●：${plain}`);
+	assert.equal((plain.match(/○/g) ?? []).length, 2, `2 个未结束应有 2 个 ○：${plain}`);
+
+	// 颜色：绿=成功、红=失败、黄=执行中、灰=未开始
+	const colors = [...line.matchAll(/\x1b\[38;2;(\d+);(\d+);(\d+)m([●○])/g)].map((m) => ({
+		rgb: [Number(m[1]), Number(m[2]), Number(m[3])],
+		glyph: m[4],
+	}));
+	assert.deepEqual(colors[0], { rgb: [63, 185, 80], glyph: "●" }, "成功应是绿色 ●");
+	assert.deepEqual(colors[1], { rgb: [248, 81, 73], glyph: "●" }, "失败应是红色 ●");
+	assert.deepEqual(colors[2], { rgb: [227, 179, 65], glyph: "○" }, "执行中应是黄色 ○");
+	assert.deepEqual(colors[3], { rgb: [110, 110, 110], glyph: "○" }, "未开始应是灰色 ○");
+
+	// 点位固定：每个点 1 列 + 1 空格 = 间距 2
+	const positions = [...plain.matchAll(/[●○]/g)].map((m) => visibleWidth(plain.slice(0, m.index)));
+	for (let i = 1; i < positions.length; i++) {
+		assert.equal(
+			positions[i] - positions[i - 1],
+			2,
+			`点间距应恒为 2 列，实际 ${positions[i] - positions[i - 1]}：${plain}`,
+		);
+	}
+
+	// 各种宽度下不超宽
+	for (const width of [30, 50, 100]) {
+		for (const l of panel
+			.renderResult(
+				{ content: [{ type: "text", text: "" }], details: subagentDetails("parallel", results) },
+				{ expanded: false, isPartial: true },
+				theme,
+				panelContext({ isPartial: true, state: { startedAt: Date.now() - 5000 } }),
+			)
+			.render(width)) {
+			assert.ok(visibleWidth(l) <= width, `width=${width} 超宽：${visibleWidth(l)}`);
+		}
+	}
+});
+
+test("subagent 面板：8 个任务只显示 3 个块，运行中循环轮播、展开看全部", async () => {
+	const {
+		registerSubagentPanel,
+		windowedChildren,
+	} = await import("../subagent-panel.ts");
+
+	// 纯函数：窗口选择
+	const items = ["a", "b", "c", "d", "e", "f", "g", "h"];
+	const short = windowedChildren(items, false, true, 0);
+	assert.deepEqual(short.visible, ["a", "b", "c"], "窗口应是前 3 个");
+	assert.equal(short.hidden, 5, "应提示还有 5 个");
+	// 轮播：时间推进后起点跟着走（并可环绕）
+	const later = windowedChildren(items, false, true, 2500);
+	assert.deepEqual(later.visible, ["b", "c", "d"], "一个间隔后应往后挪一个");
+	const wrapped = windowedChildren(items, false, true, 2500 * 7);
+	assert.deepEqual(wrapped.visible, ["h", "a", "b"], "越过末尾应环绕");
+	// 运行中随相位前进
+	assert.deepEqual(windowedChildren(items, false, true, 2500 * 2).visible, ["c", "d", "e"]);
+	// 结束后固定第一屏（不轮播）
+	assert.deepEqual(windowedChildren(items, false, false, 2500 * 5).visible, ["a", "b", "c"]);
+	// 展开态全给
+	assert.equal(windowedChildren(items, true, true, 0).visible.length, 8);
+	assert.equal(windowedChildren(items, true, true, 0).hidden, 0);
+	// 数量不超过窗口时不隐藏
+	assert.equal(windowedChildren(["a", "b"], false, true, 0).hidden, 0);
+
+	// 真实渲染
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+	const results = Array.from({ length: 8 }, (_, i) =>
+		subagentChild({ agent: `a${i + 1}`, status: i < 3 ? "completed" : "failed" }),
+	);
+	const details = { content: [{ type: "text", text: "" }], details: subagentDetails("parallel", results) };
+
+	const realNow = Date.now;
+	try {
+		Date.now = () => 10_000;
+		const collapsed = panel
+			.renderResult(details, { expanded: false, isPartial: false }, theme, panelContext({ isPartial: false }))
+			.render(100)
+			.map(strip)
+			.join("\n");
+		// 只应出现 3 个块标题 + 一行"还有 5 个"
+		const titles = collapsed.match(/^ +\uF4BE a\d+ · /gm) ?? [];
+		assert.equal(titles.length, 3, `应只渲染 3 个块：\n${collapsed}`);
+		assert.match(collapsed, /还有 5 个子代理/, `应提示剩余数量：\n${collapsed}`);
+
+		const expanded = panel
+			.renderResult(details, { expanded: true, isPartial: false }, theme, panelContext({ isPartial: false }))
+			.render(100)
+			.map(strip)
+			.join("\n");
+		assert.equal(
+			(expanded.match(/^ +\uF4BE a\d+ · /gm) ?? []).length,
+			8,
+			`展开应显示全部 8 个块：\n${expanded}`,
+		);
+		assert.doesNotMatch(expanded, /还有 \d+ 个子代理/, "展开态不该再有省略提示");
+	} finally {
+		Date.now = realNow;
+	}
+});
+
+test("subagent 面板：轮播间隔 2.5s，运行中前进、结束后固定第一屏", async () => {
+	const { windowedChildren } = await import("../subagent-panel.ts");
+	const items = ["a", "b", "c", "d", "e", "f", "g", "h"];
+
+	// 2.5s 一档
+	assert.deepEqual(windowedChildren(items, false, true, 0).visible, ["a", "b", "c"]);
+	assert.deepEqual(windowedChildren(items, false, true, 2500).visible, ["b", "c", "d"]);
+	assert.deepEqual(windowedChildren(items, false, true, 5000).visible, ["c", "d", "e"]);
+
+	// 半档不切换
+	assert.deepEqual(windowedChildren(items, false, true, 2499).visible, ["a", "b", "c"]);
+
+	// 环形
+	assert.deepEqual(windowedChildren(items, false, true, 2500 * 7).visible, ["h", "a", "b"]);
+
+	// 结束后不轮播：任何时间都固定第一屏
+	for (const t of [0, 2500, 2500 * 3, 2500 * 7]) {
+		assert.deepEqual(
+			windowedChildren(items, false, false, t).visible,
+			["a", "b", "c"],
+			`结束态 t=${t} 应固定第一屏`,
+		);
+	}
+
+	// 恒定只显示 3 个
+	for (let i = 0; i < 16; i++) {
+		assert.equal(windowedChildren(items, false, true, 2500 * i).visible.length, 3);
+	}
+});
+
+test("subagent 面板：链式只显示当前步骤，任务（含 {previous}）完整显示", async () => {
+	const {
+		registerSubagentPanel,
+		chainWindowChildren,
+	} = await import("../subagent-panel.ts");
+
+	// 纯函数：谁在跑就显示谁；都结束后显示最后一步
+	const mk = (status) => ({ status });
+	assert.deepEqual(chainWindowChildren([mk("completed"), mk("running"), mk("pending")], false).indices, [1]);
+	assert.deepEqual(chainWindowChildren([mk("completed"), mk("pending"), mk("pending")], false).indices, [1]);
+	assert.deepEqual(chainWindowChildren([mk("completed"), mk("completed"), mk("completed")], false).indices, [2]);
+	assert.equal(chainWindowChildren([mk("completed"), mk("running"), mk("pending")], false).hidden, 2);
+	// 展开 / 只有一步：全给
+	assert.equal(chainWindowChildren([mk("completed"), mk("running")], true).indices.length, 2);
+	assert.equal(chainWindowChildren([mk("running")], false).indices.length, 1);
+
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	// 链式的任务里塞着上一步的完整输出（{previous} 被替换），会非常长
+	const previousOutput = Array.from({ length: 12 }, (_, i) => `上一步输出的第 ${i + 1} 行内容`).join("\n");
+	const mkStep = (agent, step, status = "completed", text = "结论") =>
+		subagentChild({
+			agent,
+			step,
+			status,
+			task: `按这个计划执行：${previousOutput}。请统计三个文件的行数。`,
+			messages: [{ role: "assistant", content: [{ type: "toolCall", name: "bash" }, { type: "text", text }] }],
+		});
+
+	const details = {
+		content: [{ type: "text", text: "最终结论" }],
+		details: subagentDetails("chain", [
+			mkStep("planner", 1, "completed", "计划：用 wc -l。"),
+			mkStep("scout", 2, "completed", "1226 / 997 / 493。"),
+			mkStep("reviewer", 3, "completed", "数字对得上。"),
+		]),
+	};
+	const lines = panel
+		.renderResult(details, { expanded: false, isPartial: false }, theme, panelContext({ isPartial: false }))
+		.render(100)
+		.map(strip);
+	const text = lines.join("\n");
+
+	// 1) 只显示最后一步（3 步里只有最后一个块），且带步骤编号
+	assert.match(text, /3\. \uF4BE reviewer · /, `应只显示第 3 步：\n${text}`);
+	assert.doesNotMatch(text, /1\. \uF4BE planner/, `不该显示第 1 步：\n${text}`);
+	assert.doesNotMatch(text, /2\. \uF4BE scout/, `不该显示第 2 步：\n${text}`);
+	assert.match(text, /还有 2 步/, `应提示被折叠的步骤数（用"步"）：\n${text}`);
+	assert.match(text, /3\/3 步完成/);
+
+	// 2) 任务描述**完整显示**（含 {previous} 替换进来的上一步输出，不截断）
+	const index = lines.findIndex((line) => /3\. \uF4BE reviewer · /.test(line));
+	const taskBlock = lines.slice(index + 1, lines.findIndex((line, i) => i > index && line.includes("数字对得上")));
+	const taskText = taskBlock.join("\n");
+	assert.ok(taskText.includes("按这个计划执行"), `任务行：${taskText}`);
+	// 12 行上一步输出的首尾行都应该在（证明没被截断）
+	assert.ok(taskText.includes("上一步输出的第 1 行内容"), `应包含上一步输出的第一行：\n${taskText}`);
+	assert.ok(taskText.includes("上一步输出的第 12 行内容"), `应包含上一步输出的最后一行（未截断）：\n${taskText}`);
+	assert.ok(!taskText.includes("…"), `任务行不该被截断：\n${taskText}`);
+
+	// 3) 展开态：3 步全给
+	const expanded = panel
+		.renderResult(details, { expanded: true, isPartial: false }, theme, panelContext({ isPartial: false }))
+		.render(100)
+		.map(strip)
+		.join("\n");
+	for (const [step, agent] of [["1", "planner"], ["2", "scout"], ["3", "reviewer"]]) {
+		assert.match(expanded, new RegExp(`${step}\\. \uF4BE ${agent} · `), `展开应含第 ${step} 步`);
+	}
+});
+
+test("subagent 面板：链式不做等高补齐（当前块后面不该有一大片空白）", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	// 第 1 步很短；第 2 步的任务里塞着上一步的长输出（块会很高）
+	const longPrevious = Array.from({ length: 14 }, (_, i) => `前一步输出的第 ${i + 1} 行`).join("\n");
+	const mkStep = (agent, step, task, text) =>
+		subagentChild({
+			agent,
+			step,
+			task,
+			messages: [{ role: "assistant", content: [{ type: "toolCall", name: "bash" }, { type: "text", text }] }],
+		});
+
+	const details = {
+		content: [{ type: "text", text: "最终" }],
+		details: subagentDetails("chain", [
+			mkStep("planner", 1, "简短任务。", "短结论。"),
+			mkStep("scout", 2, `按计划执行：${longPrevious}`, "统计完成。"),
+		]),
+	};
+
+	for (const isPartial of [false, true]) {
+		const lines = panel
+			.renderResult(details, { expanded: false, isPartial }, theme, panelContext({ isPartial }))
+			.render(100)
+			.map(strip);
+		// 不应出现连续/多余的空白行（补齐的痕迹）
+		const blanks = lines.filter((line) => line.trim() === "");
+		assert.equal(
+			blanks.length,
+			0,
+			`链式不该有空白补齐行，实际 ${blanks.length} 行：\n${lines.join("\n")}`,
+		);
+	}
+});
+
+test("subagent 面板：链式按计划总步数一次画满进度点（未开始的补 ○）", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	// 链式 details 只增长到当前步：第 1 步在跑时只有 1 个 result，但计划是 3 步
+	const partialDetails = {
+		content: [{ type: "text", text: "" }],
+		details: subagentDetails("chain", [subagentChild({ agent: "planner", step: 1, status: "running" })]),
+	};
+	const ctx = panelContext({
+		isPartial: true,
+		state: { startedAt: Date.now() - 3000 },
+		args: { chain: [{ agent: "planner" }, { agent: "scout" }, { agent: "reviewer" }] },
+	});
+	const first = strip(
+		panel.renderResult(partialDetails, { expanded: false, isPartial: true }, theme, ctx).render(100)[0] ?? "",
+	);
+
+	// 应该有 3 个点：1 个执行中（黄 ○）+ 2 个未开始（灰 ○）
+	assert.equal((first.match(/○/g) ?? []).length, 3, `应一次画满 3 个点：${first}`);
+	assert.equal((first.match(/●/g) ?? []).length, 0, `还没有成功的点：${first}`);
+	// 运行中/待处理计数要把"还没开始的步骤"算进待处理
+	assert.match(first, /1 运行中/, `应显示 1 运行中：${first}`);
+	assert.match(first, /2 待处理/, `应显示 2 待处理（含未开始的）：${first}`);
+
+	// 不带 args.chain 时退回按 results 数量画（不炸）
+	const noArgs = strip(
+		panel
+			.renderResult(
+				partialDetails,
+				{ expanded: false, isPartial: true },
+				theme,
+				panelContext({ isPartial: true, state: { startedAt: Date.now() - 3000 } }),
+			)
+			.render(100)[0] ?? "",
+	);
+	assert.equal((noArgs.match(/○/g) ?? []).length, 1, `无 args 时按已有 results 画：${noArgs}`);
+});
+
+test("subagent 面板：任务区不显示空行（压掉段落分隔，块不被撑高）", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	// 上一步输出里带段落分隔（\n\n），链式会把它注入到下一步的 task
+	const task =
+		"审查这份统计：subagent-panel.ts 为 1041 行。\n\n差异主要来自视图层。\n\n\n建议拆分。  用 2 行给结论。";
+	const lines = panel
+		.renderCall({ agent: "scout", task }, theme, panelContext({ isPartial: true, state: {} }))
+		.render(60)
+		.map(strip);
+
+	const taskLines = lines.slice(1);
+	assert.ok(taskLines.length > 0, "应有任务行");
+	// 任务区里不能出现空白行
+	const blanks = taskLines.filter((line) => line.trim() === "");
+	assert.equal(blanks.length, 0, `任务区不该有空行：\n${taskLines.join("\n")}`);
+	// 内容仍然完整（首段与末段都在）
+	const joined = taskLines.join("").replace(/\s+/g, "");
+	assert.ok(joined.includes("审查这份统计"), "首段应在");
+	assert.ok(joined.includes("差异主要来自视图层"), "中间段应在");
+	assert.ok(joined.includes("用2行给结论"), "末段应在");
 });

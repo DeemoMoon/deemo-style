@@ -19,10 +19,8 @@ import {
 } from "node:path";
 import {
 	BAD_RED,
-	BOLD_OFF,
-	BOLD_ON,
 	CHROME_LEFT_PAD,
-	CHROME_PAD,
+	chromeLine,
 	contextUsageCached,
 	formatDuration,
 	formatPanelDuration,
@@ -170,11 +168,19 @@ function estimateContentChars(content: string | ThinkingContentLike[] | undefine
 	if (!Array.isArray(content)) return 0;
 
 	let chars = 0;
+	// 块级预算：单块内 safeJsonLengthBounded 只截超长字符串，大数组/深嵌套的
+	// 结构本身仍会被全量遍历，所以再加一道总量闸门，超预算就不再往下扫。
+	// 校准是渐进的，少采一块无妨。
+	let budget = 8192;
 	for (const block of content) {
+		if (budget <= 0) break;
 		if (!block || typeof block !== "object") continue;
-		if (block.type === "text") chars += (block as { text?: string }).text?.length ?? 0;
-		else if (block.type === "thinking") chars += block.thinking?.length ?? 0;
-		else chars += safeJsonLengthBounded(block);
+		let blockChars = 0;
+		if (block.type === "text") blockChars = (block as { text?: string }).text?.length ?? 0;
+		else if (block.type === "thinking") blockChars = block.thinking?.length ?? 0;
+		else blockChars = safeJsonLengthBounded(block);
+		chars += blockChars;
+		budget -= blockChars;
 	}
 	return chars;
 }
@@ -328,7 +334,7 @@ class InfoBarWidget implements Component {
 		const available = Math.max(1, width - CHROME_LEFT_PAD);
 		const body = visibleWidth(line) > available ? truncateToWidth(line, available, "...") : line;
 		// 整条加粗：行内的图标色序列只含前景复位（39），不会关掉加粗。
-		return [`${CHROME_PAD}${BOLD_ON}${body}${BOLD_OFF}`];
+		return [chromeLine(body)];
 	}
 }
 
@@ -354,6 +360,8 @@ export function setupInfoBar(pi: ExtensionAPI): void {
 	/** 统一动画节拍的退订函数（见 core.subscribeAnimationTick）。 */
 	let unsubscribeTick: (() => void) | undefined;
 	let lastRenderAt = 0;
+	/** tick 空转去重：上次触发重渲染时的廉价显示快照。 */
+	let lastTickSnapshot = "";
 
 	/**
 	 * 当前上下文大小（token）：本轮第一条消息结束前，用它顶上输入那一格。
@@ -379,6 +387,7 @@ export function setupInfoBar(pi: ExtensionAPI): void {
 		contentChars = 0;
 		ttftMs = undefined;
 		contextTokens = undefined;
+		lastTickSnapshot = "";
 	};
 
 	/** 只有在“任务进行中”或“正在流式”时才需要定时跳动。 */
@@ -386,7 +395,13 @@ export function setupInfoBar(pi: ExtensionAPI): void {
 
 	const startLiveUpdates = () => {
 		if (unsubscribeTick) return;
-		unsubscribeTick = subscribeAnimationTick("input-info-bar", () => tui?.requestRender());
+		unsubscribeTick = subscribeAnimationTick("input-info-bar", () => {
+			// 显示值没变就不请求整屏重渲染（pi 的 ScrollView 无视口裁剪，一次就是一帧）
+			const snapshot = `${Math.round(tps.outputTokens)}|${Math.floor(((task.running ? Date.now() : (task.endedAt ?? 0)) - (task.startedAt ?? 0)) / 1000)}`;
+			if (snapshot === lastTickSnapshot) return;
+			lastTickSnapshot = snapshot;
+			tui?.requestRender();
+		});
 	};
 
 	const stopLiveUpdates = () => {
@@ -418,7 +433,11 @@ export function setupInfoBar(pi: ExtensionAPI): void {
 	 */
 	const syncPrompt = (usage: UsageLike | undefined) => {
 		const prompt = promptTokens(usage);
-		if (prompt <= 0 || !task.running) return;
+		// 不在此处检查 task.running：message_start/message_update 的调用点
+		// 要求 usage 到了就显示（不依赖 agent_start 先到达的事件顺序）；
+		// message_end 落账 output 时才要求 running（避免历史回放污染），
+		// prompt 显示不设防。
+		if (prompt <= 0) return;
 		turn.input = prompt;
 		turn.hasUsage = true;
 	};

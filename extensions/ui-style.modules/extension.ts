@@ -52,6 +52,7 @@ import {
 	unpatchAssistantMessageStyle,
 } from "./assistant.ts";
 import { registerToolRenderers } from "./panels.ts";
+import { registerSubagentPanel } from "./subagent-panel.ts";
 import { patchSkillBanner, unpatchSkillBanner } from "./skill-banner.ts";
 import { patchBashExec, unpatchBashExec } from "./bash-exec.ts";
 import {
@@ -103,6 +104,7 @@ export default function (pi: ExtensionAPI): void {
 	if (FEATURES.bashExecBox) withPrototypePatch(pi, patchBashExec, unpatchBashExec);
 
 	if (FEATURES.toolPanels) registerToolRenderers(pi);
+	if (FEATURES.subagentPanel) registerSubagentPanel(pi);
 	if (FEATURES.userMessage) {
 		withPrototypePatch(pi, patchUserMessagePad, unpatchUserMessagePad);
 	}

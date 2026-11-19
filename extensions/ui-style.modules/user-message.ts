@@ -18,15 +18,15 @@ import {
 	UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import {
-} from "node:path";
-import {
 	BOLD_OFF,
 	BOLD_ON,
 	FEATURES,
 	hasVisibleText,
 	LEADING_CONTROL,
 	LEADING_SPACES,
+	patchPrototypeSlots,
 	PI_OUTPUT_PAD,
+	unpatchPrototypeSlots,
 } from "./core.ts";
 
 /** 深色背景用亮黄，浅色背景用深金，避免黄字在白底上看不清。 */
@@ -51,12 +51,7 @@ interface UserMessageRuntime {
 	/** UserMessageComponent 的运行时字段。 */
 	text?: string;
 	outputPad?: number;
-	__piUserPadPatched?: boolean;
-	__piUserPadOriginalRender?: (width: number) => string[];
-	/** 我们打上去的 render 本身（所有权校验用） */
-	__piUserPadPatchedRender?: (width: number) => string[];
-	__piUserPadOriginalInvalidate?: () => void;
-	__piUserPadPatchedInvalidate?: () => void;
+	[key: `ui-style:${string}`]: unknown;
 	/** 按宽度 + 文本 + padding 缓存的变换结果。 */
 	__piUserPadCache?: {
 		width: number;
@@ -75,9 +70,10 @@ interface UserMessageRuntime {
  */
 export function patchUserMessagePad(): void {
 	const proto = UserMessageComponent.prototype as unknown as UserMessageRuntime;
-	if (proto.__piUserPadPatched) unpatchUserMessagePad();
+	// 先捕获原方法：patchPrototypeSlots 内部会做一次恢复再重打（幂等）。
+	const originalRender = proto.render;
+	const originalInvalidate = proto.invalidate;
 
-	proto.__piUserPadOriginalRender = proto.render;
 	const patchedRender = function (this: UserMessageRuntime, width: number): string[] {
 		// pi 的 ScrollView 每帧会重渲染整个 transcript；Markdown 自己按宽度缓存，
 		// 但这里对每一行再去 ANSI/空格/尾行处理仍是 O(总行数)。缓存按
@@ -92,7 +88,7 @@ export function patchUserMessagePad(): void {
 			return cached.lines;
 		}
 
-		const lines = proto.__piUserPadOriginalRender?.call(this, width) ?? [];
+		const lines = originalRender.call(this, width);
 		if (USER_PAD_SHIFT <= 0) return lines;
 		// 行首可能有 OSC 133 标记、背景重置/颜色等 CSI 序列（例如 \x1b[49m），
 		// 全部原样保留，只在其后的前导空格里删掉 1 个，再在行尾补回保持总宽。
@@ -134,44 +130,25 @@ export function patchUserMessagePad(): void {
 		};
 		return result;
 	};
-	proto.render = patchedRender;
-	proto.__piUserPadPatchedRender = patchedRender;
-	proto.__piUserPadPatched = true;
-
-	const originalInvalidate = proto.invalidate;
+	const impls: Record<string, (...args: never[]) => unknown> = {
+		render: patchedRender as (...args: never[]) => unknown,
+	};
 	if (typeof originalInvalidate === "function") {
-		proto.__piUserPadOriginalInvalidate = originalInvalidate;
 		const patchedInvalidate = function (this: UserMessageRuntime): void {
 			this.__piUserPadCache = undefined;
 			originalInvalidate.call(this);
 		};
-		proto.invalidate = patchedInvalidate;
-		proto.__piUserPadPatchedInvalidate = patchedInvalidate;
+		impls.invalidate = patchedInvalidate as (...args: never[]) => unknown;
 	}
+	patchPrototypeSlots(proto, "ui-style:user-pad", impls);
 }
 
 /** 恢复 pi 原来的用户消息渲染方法。 */
 export function unpatchUserMessagePad(): void {
 	const proto = UserMessageComponent.prototype as unknown as UserMessageRuntime;
-	// 只在自己仍然拥有槽位时才恢复（/reload 时新实例可能已经打过补丁）
-	const ownsRender = proto.render === proto.__piUserPadPatchedRender;
-	const ownsInvalidate = proto.invalidate === proto.__piUserPadPatchedInvalidate;
-	if (!ownsRender && !ownsInvalidate) return;
-
-	if (ownsRender && proto.__piUserPadOriginalRender) {
-		proto.render = proto.__piUserPadOriginalRender;
-		delete proto.__piUserPadOriginalRender;
-		delete proto.__piUserPadPatchedRender;
-	}
-	if (ownsInvalidate && proto.__piUserPadOriginalInvalidate) {
-		proto.invalidate = proto.__piUserPadOriginalInvalidate;
-		delete proto.__piUserPadOriginalInvalidate;
-		delete proto.__piUserPadPatchedInvalidate;
-	}
-	if (ownsRender || ownsInvalidate) {
-		delete proto.__piUserPadCache;
-		delete proto.__piUserPadPatched;
-	}
+	unpatchPrototypeSlots(proto, "ui-style:user-pad", ["render", "invalidate"]);
+	// 缓存对象里藏着旧代码的行结果，槽位恢复后一并丢掉。
+	delete proto.__piUserPadCache;
 }
 /** Theme 的 fg/bg 使用构造时缓存的 ANSI Map，这里只改用户消息用到的两个 token。 */
 interface ThemeInternals {
@@ -207,7 +184,13 @@ function userLeadingPrefix(line: string): string {
 	return line.match(USER_LEADING_PREFIX)?.[1] ?? "";
 }
 
-/** 给用户消息的每一行加粗，并在第一行内容前加 \uE370 图标；代码块/表格/HTML/分隔线保持原样。 */
+/**
+ * 给用户消息的每一行加粗，并在第一个非空内容行前加 \uE370 图标；代码块/表格/HTML/分隔线保持原样。
+ *
+ * 图标插在块级前缀（引用 >、标题 #、列表 -）**之前**，永远落在第 0 列，
+ * 与助手消息图标同列；插在前缀之后会被算进引用块/标题/列表项内容，
+ * 悬挂缩进就会和「正文落到 GUTTER 列」的设计错位。
+ */
 function transformUserMarkdown(markdown: string): string {
 	const lines = markdown.split("\n");
 	const out: string[] = [];
@@ -226,17 +209,18 @@ function transformUserMarkdown(markdown: string): string {
 		}
 
 		const prefix = userLeadingPrefix(line);
-		let content = line.slice(prefix.length);
+		const content = line.slice(prefix.length);
 		if (!content.trim()) {
 			out.push(line);
 			continue;
 		}
 
-		if (!sparkleAdded) {
-			content = `\uE370 ${content}`;
-			sparkleAdded = true;
-		}
-		out.push(`${prefix}${BOLD_ON}${content}${BOLD_OFF}`);
+		// 图标落在块级前缀（引用/标题/列表标记）**之前**：永远在第 0 列，
+		// 与助手消息图标同列；插进前缀之后会被算进引用块/标题内容，
+		// 悬挂缩进就错位了。加粗只包内容，不动前缀（前缀是结构标记）。
+		const icon = sparkleAdded ? "" : `\uE370 `;
+		sparkleAdded = true;
+		out.push(`${icon}${prefix}${BOLD_ON}${content}${BOLD_OFF}`);
 	}
 
 	// 消息以代码块/表格开头时，图标单独占一行。

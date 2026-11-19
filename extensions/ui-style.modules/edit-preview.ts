@@ -100,19 +100,6 @@ interface PreviewReplacement {
 	newText: string;
 }
 
-/** 统计 needle 在 text 里出现的次数（不分配 split 的大数组）。 */
-function countOccurrences(text: string, needle: string): number {
-	if (needle === "") return text.length + 1;
-	let count = 0;
-	let index = 0;
-	while (true) {
-		const found = text.indexOf(needle, index);
-		if (found === -1) return count;
-		count += 1;
-		index = found + needle.length;
-	}
-}
-
 /**
  * 在内存里应用编辑（与 pi edit 工具同语义，仅用于执行中预览）。
  * 返回用于 diff 的基准内容与结果内容（fuzzy 命中时基准是归一化后的文本）。
@@ -141,7 +128,8 @@ export function applyPreviewEdits(
 		const needle = useFuzzy ? normalizeForFuzzyMatch(edit.oldText) : edit.oldText;
 		const index = base.indexOf(needle);
 		if (index === -1) return { error: `预览失败：edits[${i}] 未找到要替换的文本` };
-		if (countOccurrences(base, needle) > 1) {
+		// 判唯一只需从首个命中处继续找一次，不用从头再全量扫一遍。
+		if (base.indexOf(needle, index + 1) !== -1) {
 			return { error: `预览失败：edits[${i}] 匹配不唯一` };
 		}
 		matched.push({
@@ -200,6 +188,8 @@ export async function computeEditPreview(
 	const absolutePath = resolvePreviewPath(input.path, cwd);
 	try {
 		const info = await statAsync(absolutePath);
+		// FIFO/设备文件 size 为 0，readFileAsync 会一直等数据、永久阻塞，直接放弃。
+		if (!info.isFile()) return {};
 		// 超大文件放弃预览：结果区的 details.diff 仍是权威来源。
 		if (info.size > MAX_EDIT_PREVIEW_BYTES) return {};
 		const raw = await readFileAsync(absolutePath, "utf8");

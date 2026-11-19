@@ -101,8 +101,6 @@ export type EditableField = "name" | "model" | "thinking";
 const FIELDS: EditableField[] = ["name", "model", "thinking"];
 
 const BORDER = `${DIM_GRAY}`;
-const BAR_FILLED = "\u2588";
-const BAR_EMPTY = "\u2591";
 const FOCUS_MARK = "\u25B8";
 /** 内容行统一左缩进一列（与焦点标记 ▸ 同宽，焦点切换时文字不跳）。 */
 const IND = " ";
@@ -731,6 +729,13 @@ class SessionInfoPanel implements Component {
 			return;
 		}
 		if (matchesKey(data, "right") || matchesKey(data, "left")) {
+			// 会话名没有"快切"的概念：cycle 对 name 直接 return，
+			// 这里给个提示，避免按 ←→ 看起来静默无反应。
+			if (this.focus === "name") {
+				this.message = `${MUTED}Enter 改名，Tab 切换字段${RESET_FG}`;
+				this.requestRender();
+				return;
+			}
 			const direction = matchesKey(data, "right") ? 1 : -1;
 			void this.cycle(direction);
 			return;
@@ -796,16 +801,7 @@ class SessionInfoPanel implements Component {
 				: this.view.thought;
 		const currentIndex = all.findIndex((item) => item.value === currentKey);
 		if (currentIndex >= 0) list.setSelectedIndex(currentIndex);
-		list.onSelect = (item) => {
-			this.dropdown = undefined;
-			this.message = undefined;
-			this.requestRender(); // 先把列表收起来
-			void this.applyChoice(field, item.value);
-		};
-		list.onCancel = () => {
-			this.dropdown = undefined;
-			this.requestRender();
-		};
+		this.attachListHandlers(list, field);
 		this.focus = field;
 		this.dropdown = { field, list, query: "", all };
 		this.message = undefined;
@@ -882,17 +878,43 @@ class SessionInfoPanel implements Component {
 			getSelectListTheme(),
 			DROPDOWN_LAYOUT,
 		);
+		this.attachListHandlers(list, state.field);
+		state.list = list;
+	}
+
+	/**
+	 * 给 SelectList 挂上确认 / 取消回调（openDropdown 与 applyDropdownFilter 共用）。
+	 * onSelect 里先同步置 busy：busy 要等 applyChoice 的异步函数体执行才置的话，
+	 * 连按 Enter 可以重入（applyChoice 结束时会自己复位 busy=false）。
+	 */
+	private attachListHandlers(list: SelectList, field: EditableField): void {
 		list.onSelect = (item) => {
 			this.dropdown = undefined;
 			this.message = undefined;
-			this.requestRender();
-			void this.applyChoice(state.field, item.value);
+			this.busy = true;
+			this.requestRender(); // 先把列表收起来
+			void this.applyChoice(field, item.value);
 		};
 		list.onCancel = () => {
 			this.dropdown = undefined;
 			this.requestRender();
 		};
-		state.list = list;
+	}
+
+	/**
+	 * 「busy=true → try/catch 设置 message → busy=false → refresh(false)」的统一壳。
+	 * run 返回成功文案，抛错时统一写成红色 × 提示。
+	 * 思考档位这种同步操作也走它：busy 开关一开一关对同步路径无害。
+	 */
+	private async withBusy(run: () => Promise<string> | string): Promise<void> {
+		this.busy = true;
+		try {
+			this.message = await run();
+		} catch (error) {
+			this.message = `${fg24(BAD_RED, `× ${String(error)}`)}${RESET_FG}`;
+		}
+		this.busy = false;
+		this.refresh(false);
 	}
 
 	/** 应用下拉选择（模型 → setModel，思考 → setThinkingLevel）。 */
@@ -900,34 +922,30 @@ class SessionInfoPanel implements Component {
 		if (field === "model") {
 			const target = this.view.models.find((model) => `${model.provider}/${model.id}` === value);
 			if (!target) {
+				// 找不到目标：onSelect 里已置 busy，这里要复位
+				this.busy = false;
 				this.requestRender();
 				return;
 			}
 			// 先不渲染：setModel 是异步的，中途重绘会让底边框闪一下
-			this.busy = true;
-			try {
+			await this.withBusy(async () => {
 				const ok = await this.pi.setModel(
 					target as unknown as Parameters<ExtensionAPI["setModel"]>[0],
 				);
+				// ctx.model 追上前用本地权威值（副作用必须留在 run 里）
 				if (ok) this.modelOverride = target;
-				this.message = ok
+				return ok
 					? `${fg24(OK_GREEN, `✓ 已切换到 ${target.id}`)}${RESET_FG}`
 					: `${fg24(BAD_RED, `× ${target.provider} 未配置凭据，模型未切换`)}${RESET_FG}`;
-			} catch (error) {
-				this.message = `${fg24(BAD_RED, `× ${String(error)}`)}${RESET_FG}`;
-			}
-			this.busy = false;
-			this.refresh(false);
+			});
 			return;
 		}
 
-		try {
+		// 思考分支是同步的，但 onSelect 已置 busy，经 withBusy 走一遍正好复位
+		await this.withBusy(() => {
 			this.pi.setThinkingLevel(value as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
-			this.message = `${fg24(OK_GREEN, `✓ 思考强度 → ${value}`)}${RESET_FG}`;
-		} catch (error) {
-			this.message = `${fg24(BAD_RED, `× ${String(error)}`)}${RESET_FG}`;
-		}
-		this.refresh(false);
+			return `${fg24(OK_GREEN, `✓ 思考强度 → ${value}`)}${RESET_FG}`;
+		});
 	}
 
 	// ---- 鼠标 ---------------------------------------------------------------
@@ -950,7 +968,10 @@ class SessionInfoPanel implements Component {
 			if (event.y >= dropdownTop && event.y < dropdownTop + dropdownHeight) {
 				const result = this.dropdown.list.handleMouse({
 					...event,
-					x: Math.max(0, event.x - DROPDOWN_PAD - 2),
+					// event.x 是相对面板**整行**的坐标，要扣掉两层前缀：
+					// framePanel 正文行的 "│ "（ROW_PREFIX_WIDTH）+
+					// 下拉行自身的前缀（DROPDOWN_PAD 空格 + │ + 空格 = DROPDOWN_PAD + 2）。
+					x: Math.max(0, event.x - ROW_PREFIX_WIDTH - DROPDOWN_PAD - 2),
 					y: event.y - dropdownTop - 1, // -1 = 下拉自己的顶边
 					width: this.dropdownInner(this.width - FRAME_EXTRA),
 					height: dropdownHeight,
@@ -1051,6 +1072,8 @@ class SessionInfoPanel implements Component {
 			return;
 		}
 		if (matchesKey(data, "right")) {
+			// 移动光标即放弃全选态（否则双击全选后按 → 再打字会整段替换）
+			this.selectAll = false;
 			this.cursor = Math.min(Array.from(this.draft).length, this.cursor + 1);
 			this.requestRender();
 			return;
@@ -1062,6 +1085,8 @@ class SessionInfoPanel implements Component {
 			return;
 		}
 		if (matchesKey(data, "end") || matchesKey(data, "ctrl+e")) {
+			// 同 right：移动光标要退出全选态
+			this.selectAll = false;
 			this.cursor = Array.from(this.draft).length;
 			this.requestRender();
 			return;
@@ -1084,6 +1109,14 @@ class SessionInfoPanel implements Component {
 			return;
 		}
 		if (matchesKey(data, "delete")) {
+			if (this.selectAll) {
+				// 全选态按 delete 与 backspace 一致：整体删除
+				this.selectAll = false;
+				this.draft = "";
+				this.cursor = 0;
+				this.requestRender();
+				return;
+			}
 			const chars = Array.from(this.draft);
 			if (this.cursor < chars.length) {
 				chars.splice(this.cursor, 1);
@@ -1129,20 +1162,13 @@ class SessionInfoPanel implements Component {
 			this.requestRender();
 			return;
 		}
-		this.busy = true;
-		let message: string;
-		try {
-			this.pi.setSessionName(name);
-			message = `${fg24(OK_GREEN, "✓ 已更新会话名")}${RESET_FG}`;
-		} catch (error) {
-			message = `${fg24(BAD_RED, `× ${String(error)}`)}${RESET_FG}`;
-		}
-		this.busy = false;
+		// 先退出编辑态再走 withBusy：它内部只重绘一次（ refresh(false) ）
 		this.editing = false;
 		this.selectAll = false;
-		// 先写好提示再刷新，只重绘一次
-		this.message = message;
-		this.refresh(false);
+		await this.withBusy(() => {
+			this.pi.setSessionName(name);
+			return `${fg24(OK_GREEN, "✓ 已更新会话名")}${RESET_FG}`;
+		});
 	}
 
 	private moveFocus(direction: number): void {
@@ -1177,20 +1203,15 @@ class SessionInfoPanel implements Component {
 					: (current + direction + models.length) % models.length;
 			const target = models[next]!;
 			// 先不渲染也不清提示：等 setModel 回来一次性更新（中途重绘会闪）
-			this.busy = true;
-			try {
+			await this.withBusy(async () => {
 				const ok = await this.pi.setModel(
 					target as unknown as Parameters<ExtensionAPI["setModel"]>[0],
 				);
 				if (ok) this.modelOverride = target;
-				this.message = ok
+				return ok
 					? `${fg24(OK_GREEN, `✓ 已切换到 ${target.id}`)}${RESET_FG}`
 					: `${fg24(BAD_RED, `× ${target.provider} 未配置凭据，模型未切换`)}${RESET_FG}`;
-			} catch (error) {
-				this.message = `${fg24(BAD_RED, `× ${String(error)}`)}${RESET_FG}`;
-			}
-			this.busy = false;
-			this.refresh(false);
+			});
 			return;
 		}
 
@@ -1202,13 +1223,10 @@ class SessionInfoPanel implements Component {
 		}
 		const current = levels.indexOf(this.view.thought);
 		const next = levels[(Math.max(0, current) + direction + levels.length) % levels.length]!;
-		try {
+		await this.withBusy(() => {
 			this.pi.setThinkingLevel(next as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
-			this.message = `${fg24(OK_GREEN, `✓ 思考强度 → ${next}`)}${RESET_FG}`;
-		} catch (error) {
-			this.message = `${fg24(BAD_RED, `× ${String(error)}`)}${RESET_FG}`;
-		}
-		this.refresh(false);
+			return `${fg24(OK_GREEN, `✓ 思考强度 → ${next}`)}${RESET_FG}`;
+		});
 	}
 
 	private refresh(clearMessage = true): void {

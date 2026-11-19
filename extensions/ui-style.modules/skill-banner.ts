@@ -23,11 +23,13 @@ import {
 	ICON_SKILL,
 	moreLinesNoun,
 	MUTED,
+	patchPrototypeSlots,
 	PREVIEW_CONNECTOR_GAP,
 	RESET_FG,
 	sgr,
 	SKILL_PREVIEW_LINES,
 	UI_INDENT_WIDTH,
+	unpatchPrototypeSlots,
 } from "./core.ts";
 
 interface SkillBlockLike {
@@ -44,11 +46,7 @@ interface SkillBannerPrototype {
 	setPaddingX(padding: number): void;
 	setExpanded(expanded: boolean): void;
 	updateDisplay(): void;
-	__piSkillStyleOriginalUpdateDisplay?: () => void;
-	__piSkillStylePatchedUpdateDisplay?: () => void;
-	__piSkillStylePatchedSetPaddingX?: (padding: number) => void;
-	__piSkillStyleOriginalSetPaddingX?: (padding: number) => void;
-	__piSkillStylePatched?: boolean;
+	[key: `ui-style:${string}`]: unknown;
 }
 
 /** 技能横幅标题里图标与技能名之间的分隔符。 */
@@ -118,12 +116,9 @@ class SkillPreviewView extends CachedView {
 
 export function patchSkillBanner(): void {
 	const proto = SkillInvocationMessageComponent.prototype as unknown as SkillBannerPrototype;
-	if (proto.__piSkillStylePatched) unpatchSkillBanner();
-
+	// 先捕获原方法：patchPrototypeSlots 内部会做一次恢复再重打（幂等）。
 	const originalUpdateDisplay = proto.updateDisplay;
 	const originalSetPaddingX = proto.setPaddingX;
-	proto.__piSkillStyleOriginalUpdateDisplay = originalUpdateDisplay;
-	proto.__piSkillStyleOriginalSetPaddingX = originalSetPaddingX;
 
 	// 强制缩进在每次重建时生效：pi 创建组件后不一定调用 setPaddingX，
 	// 只补丁方法不主动触发的话缩进不会生效。
@@ -160,36 +155,15 @@ export function patchSkillBanner(): void {
 			originalUpdateDisplay.call(this);
 		}
 	};
-	proto.updateDisplay = patchedUpdateDisplay;
-	proto.setPaddingX = patchedSetPaddingX;
-	proto.__piSkillStylePatchedUpdateDisplay = patchedUpdateDisplay;
-	proto.__piSkillStylePatchedSetPaddingX = patchedSetPaddingX;
-	proto.__piSkillStylePatched = true;
+	patchPrototypeSlots(proto, "ui-style:skill", {
+		updateDisplay: patchedUpdateDisplay,
+		setPaddingX: patchedSetPaddingX,
+	});
 }
 
 /** 恢复 pi 原来的渲染方法；删除扩展或重启时使用。 */
 export function unpatchSkillBanner(): void {
 	const proto = SkillInvocationMessageComponent.prototype as unknown as SkillBannerPrototype;
-	const ownsDisplay =
-		proto.__piSkillStylePatchedUpdateDisplay !== undefined &&
-		proto.updateDisplay === proto.__piSkillStylePatchedUpdateDisplay;
-	const ownsPadding =
-		proto.__piSkillStylePatchedSetPaddingX !== undefined &&
-		proto.setPaddingX === proto.__piSkillStylePatchedSetPaddingX;
-	if (!ownsDisplay && !ownsPadding) return;
-
-	if (ownsDisplay && proto.__piSkillStyleOriginalUpdateDisplay) {
-		proto.updateDisplay = proto.__piSkillStyleOriginalUpdateDisplay;
-		delete proto.__piSkillStyleOriginalUpdateDisplay;
-		delete proto.__piSkillStylePatchedUpdateDisplay;
-	}
-	if (ownsPadding && proto.__piSkillStyleOriginalSetPaddingX) {
-		proto.setPaddingX = proto.__piSkillStyleOriginalSetPaddingX;
-		delete proto.__piSkillStyleOriginalSetPaddingX;
-		delete proto.__piSkillStylePatchedSetPaddingX;
-	}
-	// 只要收回了任意一半所有权，就说明这轮补丁已经不再完整；清掉标记，
-	// 下次 patchSkillBanner() 会重新建立两个槽位。
-	if (ownsDisplay || ownsPadding) delete proto.__piSkillStylePatched;
+	unpatchPrototypeSlots(proto, "ui-style:skill", ["updateDisplay", "setPaddingX"]);
 }
 

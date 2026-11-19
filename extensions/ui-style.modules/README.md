@@ -10,6 +10,8 @@
 |---|---|
 | `core.ts` | **共享层**：`FEATURES` 开关、对齐系统与配色常量、块计时（BlockClock）、文本/路径/预览格式化、折叠预览算法、上下文占用缓存、`CachedView`（按宽度缓存的视图基类） |
 | `panels.ts` | 工具面板（bash / codemode / read / write / edit / grep / find / ls / powershell）；收起态统一 3 行尾窗，展开态 ls 用圆角框 |
+| `subagent-data.ts` | 子代理面板的**数据层**：details 形状、图标常量、纯函数（状态图标 / 耗时 / 底行 / 标题 / display items / 状态行 / 失败证据），可单测 |
+| `subagent-panel.ts` | **子代理面板**（subagent 工具）：视图层。单个与并行/链式共用 `AgentBlockView`（块标题 → 黄色「任务」→ 滚动输出 / 结论头 4 行 → 过程摘要 → 底行），并行/链式就是「若干个缩小版单个 agent」；单个模式的标题与任务行在 `renderCall` 里（`showTitle`/`showTask` 开关避免重复） |
 | `edit-preview.ts` | edit 工具的**执行中 diff 预览**：参数归一、与 pi edit 同语义的精确/fuzzy 匹配、唯一命中/重叠检查、unified diff；独立成模块便于单测 |
 | `assistant.ts` | 助手消息原型补丁（悬挂缩进 / 去背景 / 思考块折叠预览 / 鼠标坐标换算） |
 | `skill-banner.ts` | 技能调用横幅原型补丁 |
@@ -63,7 +65,12 @@ bash ui-style.modules/tests/run.sh
 3. `skill-banner.ts`：`setPaddingX` / `setBgFn` / `expand` / `skillBlock`。
 4. `panels.ts`：`renderShell: "self"` 的渲染上下文（`state` / `lastComponent` /
    `durationMs` / `invalidate()`）。
-5. `statusline.ts`：`footerData.getGitBranch()` / `getExtensionStatuses()`，
+   **`renderCall` 拿不到 `details`**（只有 args），实时数据只走 partial 的
+   `renderResult`——所以「运行中块」必须在 `renderResult` 的 `isPartial` 分支画。
+5. `subagent-panel.ts`：依赖 subagent 工具的 `details` 形状
+   （`mode` / `results[].status|messages|usage|model|step|errorMessage`）。
+   `renderResult` 的 partial 阶段才有这些数据；`renderCall` 只从 args 推标题。
+6. `statusline.ts`：`footerData.getGitBranch()` / `getExtensionStatuses()`，
    `sessionManager.getBranch()` / `getLeafId()`。
 
 ## 设计要点（别改回去）

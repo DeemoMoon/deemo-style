@@ -240,10 +240,10 @@ function patternCandidates(
 	].filter((candidate) => candidate.length > 0);
 }
 
-/** 候选串里是否有命中（整串或取 basename 后）。 */
+/** 候选串里是否有命中。候选里已包含 basename(file)，不必再对每个候选取 basename。 */
 function matchesAny(regex: RegExp, candidates: readonly string[]): boolean {
 	for (const candidate of candidates) {
-		if (regex.test(candidate) || regex.test(candidate.split("/").pop() ?? "")) return true;
+		if (regex.test(candidate)) return true;
 	}
 	return false;
 }
@@ -292,7 +292,11 @@ function resolveConfiguredPaths(entries: string[], baseDir: string): string[] {
 		if (entry.startsWith("!") || entry.startsWith("-")) continue;
 		const raw = entry.startsWith("+") ? entry.slice(1) : entry;
 		if (raw.includes("*") || raw.includes("?")) continue;
-		paths.push(raw.startsWith("~") ? join(HOME, raw.slice(1)) : resolve(baseDir, raw));
+		// raw.slice(1) 对 `~/foo` 会留下前导 `/`（Node 碰巧能拼对），但对 Windows 风格
+		// `~\foo` 会在 normalizeSlashes 之前残留反斜杠；先剥掉所有前导分隔符再 join。
+		paths.push(
+			raw.startsWith("~") ? join(HOME, raw.slice(1).replace(/^[\\/]+/, "")) : resolve(baseDir, raw),
+		);
 	}
 	return paths;
 }
@@ -361,10 +365,15 @@ async function collectSkillFilesIn(dir: string, out: string[], depth = 0): Promi
 			return;
 		}
 	}
-	for (const entry of entries) {
-		const full = join(dir, entry.name);
-		if ((await entryKind(entry, full)) === "dir") await collectSkillFilesIn(full, out, depth + 1);
-	}
+	// 同层子目录并行递归（串行 await 在深层树上会成倍放大启动延迟）。
+	await Promise.all(
+		entries.map(async (entry) => {
+			const full = join(dir, entry.name);
+			if ((await entryKind(entry, full)) === "dir") {
+				await collectSkillFilesIn(full, out, depth + 1);
+			}
+		}),
+	);
 }
 
 /** 收集所有技能的 SKILL.md。 */
@@ -376,11 +385,14 @@ async function collectSkillFiles(cwd: string, settings: SettingsPair): Promise<s
 		join(cwd, ".agents", "skills"),
 	];
 
-	const gitRoot = (await findGitRoot(cwd)) ?? cwd;
+	// 找到 git 根就以它为界（不扫仓库外的祖先）；找不到时一路扫到文件系统根——
+	// 否则非 git 目录下第一轮就 break，祖先目录的 .agents/skills 完全漏掉。
+	// 取舍：多扫几层目录换来不丢技能，目录层级本身很浅，开销可接受。
+	const gitRoot = await findGitRoot(cwd);
 	let dir = resolve(cwd);
 	while (true) {
 		roots.push(join(dir, ".agents", "skills"));
-		if (dir === gitRoot) break;
+		if (gitRoot !== undefined && dir === gitRoot) break;
 		const parent = dirname(dir);
 		if (parent === dir) break;
 		dir = parent;
@@ -467,10 +479,13 @@ async function collectExtensionFilesIn(
 		const kind = await entryKind(entry, full);
 
 		if (kind === "dir") {
-			const entries = await Promise.all(EXTENSION_ENTRY_FILES.map((n) => statKindAsync(join(full, n))));
-			if (entries.some((entryKind) => entryKind === "file")) {
-				out.push(full);
-				kinds.set(full, "dir");
+			// 串行检查入口文件：找到一个就足够判定是扩展目录，短路掉后面的 syscall。
+			for (const entryFile of EXTENSION_ENTRY_FILES) {
+				if ((await statKindAsync(join(full, entryFile))) === "file") {
+					out.push(full);
+					kinds.set(full, "dir");
+					break;
+				}
 			}
 			continue;
 		}
@@ -952,14 +967,13 @@ export async function collectSessionResources(
 	]);
 	const enabledNames = (entries: ReadonlyArray<{ name: string; enabled: boolean }>): string[] =>
 		entries.filter((entry) => entry.enabled).map((entry) => entry.name);
-	const mcpNames = enabledNames(mcp);
-	for (const name of extensionMcp) {
-		if (!mcpNames.includes(name)) mcpNames.push(name);
-	}
+	// 用 Set 去重：数组长名单上 includes 是 O(n²)，且扩展注册的名字可能重复。
+	const mcpNames = new Set(enabledNames(mcp));
+	for (const name of extensionMcp) mcpNames.add(name);
 	return {
 		skills: enabledNames(data.skills),
 		extensions: enabledNames(data.extensions),
-		mcp: mcpNames,
+		mcp: [...mcpNames],
 	};
 }
 
