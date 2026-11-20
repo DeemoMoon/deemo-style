@@ -3489,8 +3489,14 @@ test("子代理结果弹窗：完成后点击某个块 → 弹窗只显示结论
 	const hitY = lines.findIndex((line) => /worker · /.test(line));
 	assert.ok(hitY >= 0, `找不到 worker 的块：\n${lines.join("\n")}`);
 
-	const result = view.handleMouse?.({ type: "click", button: "left", x: 4, y: hitY, width: 100, height: lines.length });
+	const result = view.handleMouse?.({ type: "press", button: "left", x: 4, y: hitY, width: 100, height: lines.length });
 	assert.deepEqual(result, { handled: true }, "点击子代理块应被拦截（不交给 pi 的展开逻辑）");
+	// 同一次物理点击还会产生 click 事件：必须忽略，否则会开第二个弹窗（要按两次 Esc）
+	assert.equal(
+		view.handleMouse?.({ type: "click", button: "left", x: 4, y: hitY, width: 100, height: lines.length }),
+		undefined,
+		"click 事件不该再打开一个弹窗",
+	);
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	assert.equal(opened.length, 1, "应弹出一个窗口");
 
@@ -3514,7 +3520,7 @@ test("子代理结果弹窗：完成后点击某个块 → 弹窗只显示结论
 	);
 	// 点到块外面也不拦截
 	assert.equal(
-		view.handleMouse?.({ type: "click", button: "left", x: 4, y: 0, width: 100, height: lines.length }),
+		view.handleMouse?.({ type: "press", button: "left", x: 4, y: 0, width: 100, height: lines.length }),
 		undefined,
 		"点状态行不该拦截",
 	);
@@ -3568,7 +3574,7 @@ test("子代理结果弹窗：按内容自动尺寸，且 Esc/q 通过输入监�
 	const view = panel.renderResult(result, { expanded: false, isPartial: false }, theme, panelContext({ isPartial: false }));
 	const lines = view.render(100).map(strip);
 	const y = lines.findIndex((line) => /scout · /.test(line));
-	view.handleMouse({ type: "click", button: "left", x: 4, y, width: 100, height: lines.length });
+	view.handleMouse({ type: "press", button: "left", x: 4, y, width: 100, height: lines.length });
 	await new Promise((r) => setTimeout(r, 0));
 
 	const entry = opened[0];
@@ -3604,8 +3610,11 @@ test("子代理结果弹窗：按内容自动尺寸，且 Esc/q 通过输入监�
 	// ④ Esc 通过**扩展级输入监听**关闭（不依赖焦点/鼠标位置）
 	assert.equal(terminalHandlers.length, 1, "应注册一个 onTerminalInput 处理器");
 	const handler = terminalHandlers[0];
-	// 鼠标序列放行（不能吃掉 pi 的点击/滚轮）
-	assert.equal(handler("\x1b[<0;10;5M"), undefined, "鼠标序列应放行");
+	// 滚轮：由弹窗消费并滚动
+	assert.deepEqual(handler("\x1b[<65;10;5M"), { consume: true }, "滚轮下应被弹窗消费");
+	assert.deepEqual(handler("\x1b[<64;10;5M"), { consume: true }, "滚轮上应被弹窗消费");
+	// 其它鼠标事件（点击）也吞掉：模态层
+	assert.deepEqual(handler("\x1b[<0;10;5M"), { consume: true }, "点击应被弹窗吞掉");
 	// Ctrl+C 放行（弹窗开着也要能中断 agent）
 	assert.equal(handler("\x03"), undefined, "Ctrl+C 应放行");
 	// 其它按键被消费（模态，不漏进输入框）
@@ -3618,4 +3627,57 @@ test("子代理结果弹窗：按内容自动尺寸，且 Esc/q 通过输入监�
 	assert.equal(handler("q"), undefined, "关闭后不该再消费输入");
 
 	overlayMod.setOverlayUiForTest(undefined);
+});
+
+test("子代理结果弹窗：滚轮滚动生效、连点只开一个窗口", async () => {
+	const { ChildResultOverlay, wheelDirection, setOverlayUiForTest, showChildResultOverlay } = await import(
+		"../subagent-result-overlay.ts"
+	);
+
+	// ① 滚轮方向解析（SGR 鼠标序列）
+	assert.equal(wheelDirection("\x1b[<64;10;5M"), -1, "64 = 滚轮上");
+	assert.equal(wheelDirection("\x1b[<65;10;5M"), 1, "65 = 滚轮下");
+	assert.equal(wheelDirection("\x1b[<68;10;5M"), -1, "带 Shift 的滚轮上");
+	assert.equal(wheelDirection("\x1b[<0;10;5M"), undefined, "左键不是滚轮");
+	assert.equal(wheelDirection("a"), undefined);
+
+	// ② 滚轮真的滚动内容（长结论 + 矮终端，必须滚动才看得到后面）
+	const body = Array.from({ length: 30 }, (_, i) => `第 ${i + 1} 行结论`).join("\n");
+	const overlay = new ChildResultOverlay({
+		payload: { title: "t", body },
+		theme: { fg: (_t, x) => x },
+		done: () => {},
+		cols: 80,
+		rows: 12,
+	});
+	const width = overlay.preferredWidth();
+	const before = overlay.render(width).map(strip).join("\n");
+	assert.match(before, /第 1 行结论/, "初始应显示第一行");
+	overlay.scrollBy(3); // 滚 9 行
+	const after = overlay.render(width).map(strip).join("\n");
+	assert.notEqual(after, before, "滚动后内容应改变");
+	assert.doesNotMatch(after, /第 1 行结论/, "第一行应已滚出窗口");
+	// 滚到顶不会再越界
+	for (let i = 0; i < 20; i++) overlay.scrollBy(-3);
+	assert.match(overlay.render(width).map(strip).join("\n"), /第 1 行结论/, "回滚到顶应重新看到第一行");
+
+	// ③ 连点只开一个弹窗（第二次请求被守卫忽略）
+	let opened = 0;
+	setOverlayUiForTest({
+		onTerminalInput: () => () => {},
+		custom: async (factory) => {
+			opened += 1;
+			factory(
+				{ addInputListener: () => () => {}, terminal: { columns: 80, rows: 24 } },
+				{ fg: (_t, x) => x },
+				{},
+				() => {},
+			);
+		},
+	});
+	const child = subagentChild({ agent: "scout" });
+	await showChildResultOverlay(child);
+	await showChildResultOverlay(child); // 第二次应被忽略
+	assert.equal(opened, 1, `连点只应打开一个弹窗，实际 ${opened}`);
+	setOverlayUiForTest(undefined);
 });

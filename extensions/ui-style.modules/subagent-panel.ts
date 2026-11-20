@@ -517,7 +517,9 @@ class SubagentResultView extends CachedView {
 	 */
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (event.type === "wheel") return undefined;
-		if (event.type !== "press" && event.type !== "click") return undefined;
+		// **只处理 press**：一次物理点击 pi 会先发 press、再发 click（release 时合成），
+		// 两种都处理就会连开两个弹窗 —— 于是要按两次 Esc 才能关完。
+		if (event.type !== "press") return undefined;
 		if (event.button !== "left") return undefined;
 		const hit = this.blockRanges.find(
 			(range) => event.y >= range.start && event.y < range.end,

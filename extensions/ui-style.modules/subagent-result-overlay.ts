@@ -47,6 +47,12 @@ interface OverlayPayload {
 
 /** `ctx.ui`（`ui.custom` 只能在扩展事件里拿）。 */
 let overlayUi: ExtensionContext["ui"] | undefined;
+/**
+ * 是否已经有结果弹窗打开。
+ *
+ * 双击/连点会重复请求打开，弹几个窗口就得多按几次 Esc；这里直接忽略第二次。
+ */
+let overlayOpen = false;
 
 /** 在 session_start 里调用，保存 ui 引用（session_shutdown 清掉）。 */
 export function captureOverlayUi(pi: ExtensionAPI): void {
@@ -63,6 +69,8 @@ export function captureOverlayUi(pi: ExtensionAPI): void {
 /** 供测试注入/检查（生产由 captureOverlayUi 在 session_start 设置）。 */
 export function setOverlayUiForTest(ui: ExtensionContext["ui"] | undefined): void {
 	overlayUi = ui;
+	// 顺手复位"是否已有弹窗"的守卫：测试之间不应互相影响。
+	overlayOpen = false;
 }
 
 /**
@@ -177,6 +185,11 @@ export class ChildResultOverlay implements Component {
 		return Math.max(1, this.rows - 4);
 	}
 
+	/** 滚轮滚动（一次滚 3 行）。 */
+	scrollBy(steps: number): void {
+		this.top = Math.max(0, this.top + steps * 3);
+	}
+
 	handleInput(data: string): void {
 		if (isKeyRelease(data)) return;
 		if (isCloseKey(data)) {
@@ -227,9 +240,23 @@ export class ChildResultOverlay implements Component {
 	}
 }
 
-/** 终端鼠标序列（SGR：`ESC [ < b ; x ; y M/m`）——必须放行给 pi 的鼠标分发。 */
+/** 终端鼠标序列（SGR：`ESC [ < b ; x ; y M/m`）。 */
+const SGR_MOUSE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
+
 function isMouseSequence(data: string): boolean {
-	return /^\x1b\[<\d+;\d+;\d+[Mm]/.test(data);
+	return SGR_MOUSE.test(data);
+}
+
+/** 滚轮方向：-1 向上、+1 向下；不是滚轮返回 undefined。 */
+export function wheelDirection(data: string): number | undefined {
+	const match = SGR_MOUSE.exec(data);
+	if (!match) return undefined;
+	const button = Number(match[1]);
+	// 64 = 滚轮上、65 = 滚轮下；带修饰键时是 64/65 的位或（4/8/16）。
+	const base = button & ~(4 | 8 | 16);
+	if (base === 64) return -1;
+	if (base === 65) return 1;
+	return undefined;
 }
 
 /** 关闭键：Esc（含 CSI 变体）/ q / Q。 */
@@ -249,7 +276,8 @@ export async function showChildResultOverlay(
 	elapsed?: string,
 ): Promise<void> {
 	const ui = overlayUi;
-	if (!ui) return;
+	if (!ui || overlayOpen) return;
+	overlayOpen = true;
 	const payload: OverlayPayload = {
 		title: childResultTitle(child, elapsed),
 		body: childResultText(child),
@@ -280,11 +308,19 @@ export async function showChildResultOverlay(
 				closed = true;
 				unsubscribe?.();
 				unsubscribe = undefined;
+				overlayOpen = false;
 				done();
 			};
 			const handle = (data: string): unknown => {
 				if (closed) return undefined;
-				if (isMouseSequence(data)) return undefined;
+				// 滚轮：滚弹窗（不是 transcript），并消费。
+				const wheel = wheelDirection(data);
+				if (wheel !== undefined) {
+					component?.scrollBy(wheel);
+					return { consume: true };
+				}
+				// 其它鼠标事件（点击/拖拽）：模态吞掉，别让下面 react。
+				if (isMouseSequence(data)) return { consume: true };
 				// Ctrl+C 永远放行：就算弹窗开着，用户也要能中断正在跑的 agent。
 				if (data === "\x03") return undefined;
 				if (isKeyRelease(data)) return { consume: true };
