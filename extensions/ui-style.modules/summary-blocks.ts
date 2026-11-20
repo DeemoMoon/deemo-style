@@ -40,6 +40,7 @@ import {
 	BOLD_ON,
 	CachedView,
 	formatPanelDuration,
+	liveTitle,
 	formatTokens,
 	ICON_CLOCK,
 	MUTED,
@@ -48,7 +49,6 @@ import {
 	PREVIEW_CONNECTOR_FIRST,
 	PREVIEW_CONNECTOR_REST,
 	RESET_FG,
-	shimmerText,
 	sgr,
 	UI_INDENT,
 	unpatchPrototypeSlots,
@@ -425,16 +425,14 @@ export class CompactionIndicatorView extends CachedView {
 
 	protected renderLines(width: number): string[] {
 		const elapsedMs = this.clock.startedAt === undefined ? 0 : Date.now() - this.clock.startedAt;
-		const plain = `${ICON_COMPACTION} 压缩中`;
-		// 标题扫光（含图标与"压缩中"）+ **行尾时钟与耗时**（不参与扫光，保持可读）。
-		// 首帧（<16ms）不显示耗时，避免闪一下 "0ms"（与 liveClockText 同口径）。
-		const timer =
-			elapsedMs < 16
-				? ""
-				: ` · ${ICON_CLOCK} ${formatPanelDuration(elapsedMs)}`;
-		const title =
-			`${BOLD_ON}${shimmerText(plain, COMPACTION_ACCENT, this.clock.startedAt)}${BOLD_OFF}` +
-			`${sgr(COMPACTION_ACCENT)}${timer}${RESET_FG}`;
+		// 标题（含行尾时钟与耗时）整行走同一个构建器：与输入框指示完全同色同动画。
+		const title = liveTitle(
+			ICON_COMPACTION,
+			"压缩中",
+			COMPACTION_ACCENT,
+			this.clock.startedAt,
+			elapsedMs,
+		);
 		const lines = [`${UI_INDENT}${title}`];
 
 		const contentWidth = Math.max(1, width - UI_INDENT.length - PREVIEW_CONNECTOR_REST.length);

@@ -21,10 +21,8 @@ import {
 	BOLD_OFF,
 	BOLD_ON,
 	CORAL,
-	formatPanelDuration,
-	ICON_CLOCK,
+	liveTitle,
 	mixRgb,
-	MUTED,
 	RESET_FG,
 	sgr,
 	SKY_BLUE,
@@ -129,6 +127,9 @@ export const BRANCH_SUMMARY_TEXT = "摘要生成中";
 /** 上下文压缩时的文案。 */
 export const COMPACTION_TEXT = "压缩上下文中";
 
+/** 指示器标题色：与压缩/分支摘要块同一支紫色。 */
+const STATUS_ACCENT: Rgb = [177, 142, 250];
+
 /** kind → 文案（只处理这两种"元事件"指示器）。 */
 const STATUS_TEXT_BY_KIND: Record<string, string> = {
 	branchSummary: BRANCH_SUMMARY_TEXT,
@@ -151,10 +152,8 @@ export function patchSummaryStatusIndicators(): void {
 				this.restartAnimation?.();
 			}
 			const elapsed = Date.now() - (this.__uiStyleStart ?? Date.now());
-			// 呼吸文案 + 行尾时钟与耗时（与压缩块标题同一口径）。
-			// 首帧（<16ms）先不显示，避免闪一下 "0ms"。
-			const timer = elapsed < 16 ? "" : ` · ${ICON_CLOCK} ${formatPanelDuration(elapsed)}`;
-			this.message = `${workingMessage(elapsed, text)}${timer === "" ? "" : MUTED + timer + RESET_FG}`;
+			// 与压缩块标题共用 liveTitle：同样的紫色 + 同样的扫光（耗时也进扫光带）。
+			this.message = liveTitle("", text, STATUS_ACCENT, this.__uiStyleStart, elapsed);
 		}
 		originalUpdateDisplay.call(this);
 	};

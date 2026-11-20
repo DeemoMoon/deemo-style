@@ -13,12 +13,17 @@ import {
 import { keyHint } from "@earendil-works/pi-coding-agent";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	BOLD_OFF,
+	BOLD_ON,
+	ICON_CLOCK,
 	PANEL_PREVIEW_LINES,
+	RESET_FG,
 	PREVIEW_CONNECTOR_FIRST,
 	PREVIEW_CONNECTOR_REST,
 	PREVIEW_CONNECTOR_WIDTH,
 } from "./theme.ts";
-import type { ThemeLike } from "./theme.ts";
+import { shimmerText } from "./theme.ts";
+import type { Rgb, ThemeLike } from "./theme.ts";
 
 
 // ---- 三、共享工具（计时 / 上下文 / 文本 / 预览格式化 / 缓存基类） ------
@@ -259,6 +264,26 @@ export function execClockText(clock: BlockClock | undefined): string | undefined
 	if (ms === undefined) return undefined;
 	if (clock.endedAt !== undefined && ms < MIN_EXEC_CLOCK_MS) return undefined;
 	return formatPanelDuration(ms);
+}
+
+/**
+ * 「运行中的标题」：图标 + 文案 + 行尾 `⏱ 耗时`，**整行一起扫光**。
+ *
+ * 压缩块与它的输入框指示共用这一份，保证两处的配色与动画完全一致
+ * （耗时也在扫光带里，不再是"贴在旁边的一截灰字"）。
+ * 首帧（<16ms）先不拼耗时，避免闪一下 "0ms"。
+ */
+export function liveTitle(
+	icon: string,
+	label: string,
+	accent: Rgb,
+	startedAt: number | undefined,
+	elapsedMs: number,
+): string {
+	const timer = elapsedMs < 16 ? "" : ` · ${ICON_CLOCK} ${formatPanelDuration(elapsedMs)}`;
+	const prefix = icon === "" ? "" : `${icon} `;
+	const plain = `${prefix}${label}${timer}`;
+	return `${BOLD_ON}${shimmerText(plain, accent, startedAt)}${BOLD_OFF}${RESET_FG}`;
 }
 
 /**

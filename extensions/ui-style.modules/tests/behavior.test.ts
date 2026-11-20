@@ -3283,3 +3283,45 @@ test("摘要/压缩指示器：文案换成「摘要生成中」/「压缩上下
 	assert.ok(strip(workingMessage(0, BRANCH_SUMMARY_TEXT)).includes(BRANCH_SUMMARY_TEXT));
 	assert.ok(strip(workingMessage(0, COMPACTION_TEXT)).includes(COMPACTION_TEXT));
 });
+
+test("压缩的两处计时：同色（紫）同动画（整行扫光，耗时也在扫光带里）", async () => {
+	const { liveTitle } = await import("../core.ts");
+	const { CompactionIndicatorView } = await import("../summary-blocks.ts");
+	const { patchSummaryStatusIndicators, unpatchSummaryStatusIndicators } = await import("../editor.ts");
+	const { Loader } = await import("@earendil-works/pi-tui");
+	const { ICON_COMPACTION } = await import("../summary-blocks.ts");
+
+	const realNow = Date.now;
+	// ① 压缩块标题与 ② 输入框指示：同样的构造方式 → 同样的颜色数与紫色
+	Date.now = () => 1_000_000 + 1840;
+	try {
+		const blockLine = new CompactionIndicatorView({ startedAt: 1_000_000 }, "原文").render(72)[0] ?? "";
+
+		patchSummaryStatusIndicators();
+		const loader = new Loader(undefined, (t) => t, (t) => t);
+		loader.kind = "compaction";
+		Date.now = () => 1_000_000;
+		loader.updateDisplay();
+		Date.now = () => 1_000_000 + 1840;
+		loader.updateDisplay();
+		const indicatorLine = loader.render(72)[1] ?? "";
+		loader.stop();
+		unpatchSummaryStatusIndicators();
+
+		// 两处都含紫色、都含耗时、都逐字符着色（扫光）
+		for (const line of [blockLine, indicatorLine]) {
+			assert.ok(line.includes("177;142;250"), `应使用紫色：${JSON.stringify(strip(line))}`);
+			assert.match(strip(line), /1\.8s/, `应显示同样的耗时：${JSON.stringify(strip(line))}`);
+			const colors = new Set([...line.matchAll(/38;2;\d+;\d+;\d+/g)].map((m) => m[0]));
+			assert.ok(colors.size >= 3, `耗时也在扫光带里（多种颜色），实际 ${colors.size}`);
+		}
+		// 时钟图标在两处都出现
+		assert.ok(blockLine.includes("\uE382") && indicatorLine.includes("\uE382"), "两处都应有钟表图标");
+
+		// liveTitle 本身：首帧 <16ms 不拼耗时（避免闪 0ms）
+		const firstFrame = liveTitle(ICON_COMPACTION, "压缩中", [177, 142, 250], 0, 0);
+		assert.doesNotMatch(strip(firstFrame), /ms|s ·/, "首帧不该有耗时");
+	} finally {
+		Date.now = realNow;
+	}
+});
