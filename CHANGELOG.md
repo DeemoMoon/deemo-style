@@ -12,6 +12,7 @@
 - **压缩中的 5 行窗口自动下滚**：原文来自 `preparation.messagesToSummarize`，
   窗口每 350ms 下滚一行（`SUMMARY_SCROLL_MS`），滚到底停在尾部；上下都有
   `… 上面还有 N 行` / `… 下面还有 N 行` 提示且不占窗口额度。
+- **压缩块标题色改成紫**（与分支摘要统一，都是"上下文被改写"的元事件），不再用蓝。
 - **分支摘要去掉时钟**，改成显示摘要大小：`\uF4CA 分支摘要 · from 3c9c3f06 · 摘要 13 tokens`。
   注意 pi-ai 的 `estimateTokens` 对 assistant 只认 block 数组的 content
   （传字符串会得 0），已显式包成 text 块并加测试防止回归。

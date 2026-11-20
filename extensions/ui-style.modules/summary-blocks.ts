@@ -73,9 +73,13 @@ export const SUMMARY_WINDOW_LINES = 5;
  */
 export const SUMMARY_SCROLL_MS = 350;
 
-/** 标题色：压缩用蓝、分支用紫（与其它块同族，又能区分）。 */
-const COMPACTION_ACCENT: Rgb = [95, 135, 215];
-const BRANCH_ACCENT: Rgb = [177, 142, 250];
+/**
+ * 标题色：压缩与分支统一用紫（`ACCENT_VIOLET` 同族），与工具面板/子代理的蓝色区分开
+ * ——这两个块都是"上下文被改写"的元事件，用同一色相更能表达"同类"。
+ */
+const SUMMARY_ACCENT: Rgb = [177, 142, 250];
+const COMPACTION_ACCENT = SUMMARY_ACCENT;
+const BRANCH_ACCENT = SUMMARY_ACCENT;
 
 /**
  * 摘要块的着色：只有"暗一档"的标记需要真颜色，正文用终端默认色。
