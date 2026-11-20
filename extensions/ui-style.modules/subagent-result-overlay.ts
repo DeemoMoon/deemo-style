@@ -227,6 +227,11 @@ export class ChildResultOverlay implements Component {
 	}
 }
 
+/** 终端鼠标序列（SGR：`ESC [ < b ; x ; y M/m`）——必须放行给 pi 的鼠标分发。 */
+function isMouseSequence(data: string): boolean {
+	return /^\x1b\[<\d+;\d+;\d+[Mm]/.test(data);
+}
+
 /** 关闭键：Esc（含 CSI 变体）/ q / Q。 */
 function isCloseKey(data: string): boolean {
 	return matchesKey(data, "escape") || data === "q" || data === "Q";
@@ -258,11 +263,18 @@ export async function showChildResultOverlay(
 			const cols = terminal?.columns ?? 80;
 			const rows = terminal?.rows ?? 24;
 
-			// 关闭路径要**可靠**：overlay 的焦点可能被鼠标事件/其他组件抢走，
-			// 所以除了组件的 handleInput，再挂一个 TUI 级输入监听（它在焦点分发之前跑），
-			// Esc/q 一定关得掉；关闭时把它摘掉，避免泄漏。
+			// 让弹窗成为**最上层且独占键盘**。
+			//
+			// 只依赖组件自身的 handleInput 是不够的：overlay 的焦点会被鼠标事件抢走，
+			// 于是"鼠标不在窗口上时按 Esc 没反应"。这里挂一个**扩展级终端输入监听**
+			// （`ui.onTerminalInput`，在焦点分发之前跑），行为：
+			//   - 鼠标序列原样放行（否则 pi 收不到点击/滚轮）；
+			//   - Esc / q → 关闭并消费；
+			//   - 滚动键 → 交给弹窗滚动并消费；
+			//   - 其余按键 → 直接消费（模态：不要漏进输入框）。
 			let unsubscribe: (() => void) | undefined;
 			let closed = false;
+			let component: ChildResultOverlay | undefined;
 			const close = (): void => {
 				if (closed) return;
 				closed = true;
@@ -270,18 +282,33 @@ export async function showChildResultOverlay(
 				unsubscribe = undefined;
 				done();
 			};
-			unsubscribe = (
-				tui as unknown as {
-					addInputListener?: (listener: (data: string) => unknown) => () => void;
+			const handle = (data: string): unknown => {
+				if (closed) return undefined;
+				if (isMouseSequence(data)) return undefined;
+				// Ctrl+C 永远放行：就算弹窗开着，用户也要能中断正在跑的 agent。
+				if (data === "\x03") return undefined;
+				if (isKeyRelease(data)) return { consume: true };
+				if (isCloseKey(data)) {
+					close();
+					return { consume: true };
 				}
-			).addInputListener?.((data: string) => {
-				if (isKeyRelease(data) || !isCloseKey(data)) return undefined;
-				close();
+				component?.handleInput(data);
 				return { consume: true };
-			});
+			};
+			const uiWithInput = ui as unknown as {
+				onTerminalInput?: (handler: (data: string) => unknown) => () => void;
+			};
+			unsubscribe =
+				uiWithInput.onTerminalInput?.(handle) ??
+				(
+					tui as unknown as {
+						addInputListener?: (handler: (data: string) => unknown) => () => void;
+					}
+				).addInputListener?.(handle);
 
-			overlay = new ChildResultOverlay({ payload, theme, done: close, cols, rows });
-			return overlay;
+			component = new ChildResultOverlay({ payload, theme, done: close, cols, rows });
+			overlay = component;
+			return component;
 		},
 		{
 			overlay: true,

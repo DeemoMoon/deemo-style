@@ -3538,7 +3538,12 @@ test("子代理结果弹窗：按内容自动尺寸，且 Esc/q 通过输入监�
 
 	// 假 ui：记录每次弹窗的 factory 与 overlayOptions
 	const opened = [];
+	const terminalHandlers = [];
 	overlayMod.setOverlayUiForTest({
+		onTerminalInput: (handler) => {
+			terminalHandlers.push(handler);
+			return () => {};
+		},
 		custom: async (factory, options) => {
 			const theme = { fg: (_t, x) => x };
 			const listeners = [];
@@ -3596,13 +3601,21 @@ test("子代理结果弹窗：按内容自动尺寸，且 Esc/q 通过输入监�
 	const widths = new Set(rendered.map((line) => visibleWidth(line)));
 	assert.equal(widths.size, 1, `长内容弹窗每行宽度应一致：${[...widths].join(",")}`);
 
-	// ④ Esc / q 通过 TUI 输入监听关闭（不依赖焦点）
-	assert.equal(entry.listeners.length, 1, "应挂一个输入监听");
-	const listener = entry.listeners[0];
-	assert.deepEqual(listener("\x1b"), { consume: true }, "Esc 应被消费");
+	// ④ Esc 通过**扩展级输入监听**关闭（不依赖焦点/鼠标位置）
+	assert.equal(terminalHandlers.length, 1, "应注册一个 onTerminalInput 处理器");
+	const handler = terminalHandlers[0];
+	// 鼠标序列放行（不能吃掉 pi 的点击/滚轮）
+	assert.equal(handler("\x1b[<0;10;5M"), undefined, "鼠标序列应放行");
+	// Ctrl+C 放行（弹窗开着也要能中断 agent）
+	assert.equal(handler("\x03"), undefined, "Ctrl+C 应放行");
+	// 其它按键被消费（模态，不漏进输入框）
+	assert.deepEqual(handler("x"), { consume: true }, "普通按键应被消费");
+	assert.equal(entry.done(), 0, "普通按键不该关闭弹窗");
+	// Esc 关闭并消费
+	assert.deepEqual(handler("\x1b"), { consume: true }, "Esc 应被消费");
 	assert.equal(entry.done(), 1, "Esc 应触发关闭");
-	listener("q");
-	assert.equal(entry.done(), 1, "已关闭后重复按键不应再触发");
+	// 关闭后不再响应
+	assert.equal(handler("q"), undefined, "关闭后不该再消费输入");
 
 	overlayMod.setOverlayUiForTest(undefined);
 });
