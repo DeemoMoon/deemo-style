@@ -422,6 +422,8 @@ test("buildSessionInfoRows：窄宽度下不超宽，长会话名被截断", () 
 			turnCount: 6,
 			activeMs: 5_000,
 			wallMs: 60_000,
+			sessionAgeMs: 0,
+			createdAt: 0,
 		},
 		entryCount: 12,
 		resources: { skills: ["docx", "web-dev"], extensions: ["ui-style.ts"], mcp: ["filesystem"] },
@@ -434,9 +436,9 @@ test("buildSessionInfoRows：窄宽度下不超宽，长会话名被截断", () 
 	}
 	const wide = buildSessionInfoRows(view, plainTheme, 100).map((row) => stripAnsi(row.text)).join("\n");
 	assert.ok(wide.includes("xhigh"), wide);
-	// 概览：时长（wallMs → 1 m 0 s）+ 目录；加载区：技能/扩展/MCP
+	// 概览：创建（无 createdAt 时退回 wallMs → 1 m 0 s）+ 目录；加载区：技能/扩展/MCP
 	assert.ok(wide.includes("1 m 0 s"), wide);
-	assert.ok(wide.includes("时长"), wide);
+	assert.ok(wide.includes("创建"), wide);
 	assert.ok(wide.includes("目录"), wide);
 	assert.ok(wide.includes("加载"), wide);
 	assert.ok(wide.includes("docx · web-dev"), wide);

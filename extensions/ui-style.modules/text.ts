@@ -242,6 +242,23 @@ export function formatDuration(ms: number): string {
 }
 
 /**
+ * 绝对时间：`2026年11月19日 10时00分00秒`（本地时区）。
+ *
+ * 用于"会话创建时间"这类需要看**具体哪一刻**的场景（相对时长会用
+ * `formatDuration`）。时间无效时返回 `--`，不显示 `Invalid Date`。
+ */
+export function formatDateTime(ms: number | undefined): string {
+	if (ms === undefined || !Number.isFinite(ms) || ms <= 0) return "--";
+	const date = new Date(ms);
+	if (Number.isNaN(date.getTime())) return "--";
+	const pad = (value: number): string => String(value).padStart(2, "0");
+	return (
+		`${date.getFullYear()}年${pad(date.getMonth() + 1)}月${pad(date.getDate())}日 ` +
+		`${pad(date.getHours())}时${pad(date.getMinutes())}分${pad(date.getSeconds())}秒`
+	);
+}
+
+/**
  * 块耗时的基础格式：不足 1 秒用毫秒（read/write/edit 这类本机工具通常
  * 只有几毫秒到几十毫秒，用一位小数秒会永远显示 0.0s），其余交给
  * formatDuration。信息条仍用 formatDuration，不受影响。

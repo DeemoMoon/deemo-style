@@ -56,6 +56,8 @@ export interface SessionStats {
 	wallMs: number;
 	/** 会话创建 → 现在（毫秒）；拿不到创建时间时为 0。 */
 	sessionAgeMs: number;
+	/** 会话创建时间（毫秒时间戳）；拿不到时为 0。 */
+	createdAt: number;
 }
 
 /**
@@ -81,6 +83,7 @@ export function emptyStats(): SessionStats {
 		activeMs: 0,
 		wallMs: 0,
 		sessionAgeMs: 0,
+		createdAt: 0,
 	};
 }
 
@@ -262,10 +265,9 @@ export function createSessionStatsComputer(): (
 		// 缓存里的 base 只保留"已完成条目"的累积。
 		const stats: SessionStats = { ...base };
 		finalizeStats(stats, tracker, now);
-		stats.sessionAgeMs =
-			createdAt === undefined || !Number.isFinite(createdAt) || createdAt <= 0
-				? 0
-				: Math.max(0, now - createdAt);
+		const valid = createdAt !== undefined && Number.isFinite(createdAt) && createdAt > 0;
+		stats.createdAt = valid ? createdAt : 0;
+		stats.sessionAgeMs = valid ? Math.max(0, now - createdAt) : 0;
 		return stats;
 	};
 }
@@ -303,9 +305,8 @@ export function computeSessionStats(
 		trackEntryTime(stats, tracker, entry);
 	}
 	finalizeStats(stats, tracker, now);
-	stats.sessionAgeMs =
-		createdAt === undefined || !Number.isFinite(createdAt) || createdAt <= 0
-			? 0
-			: Math.max(0, now - createdAt);
+	const valid = createdAt !== undefined && Number.isFinite(createdAt) && createdAt > 0;
+	stats.createdAt = valid ? createdAt : 0;
+	stats.sessionAgeMs = valid ? Math.max(0, now - createdAt) : 0;
 	return stats;
 }

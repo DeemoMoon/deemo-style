@@ -3715,11 +3715,13 @@ test("子代理结果弹窗：滚轮滚动生效、连点只开一个窗口", as
 	setOverlayUiForTest(undefined);
 });
 
-test("信息面板：时长显示会话创建到现在，而不是首条→最后一条", async () => {
+test("信息面板：显示会话创建的具体日期时间（拿不到时退回相对时长）", async () => {
 	const { buildSessionInfoRows } = await import("../info-panel.ts");
 	const { emptyStats } = await import("../session-stats.ts");
 
 	const base = emptyStats();
+	// 2026-11-19 10:00:00（本地时区）
+	const createdAt = new Date(2026, 10, 19, 10, 0, 0).getTime();
 	const view = {
 		model: undefined,
 		thought: "high",
@@ -3729,16 +3731,22 @@ test("信息面板：时长显示会话创建到现在，而不是首条→最�
 		resources: { skills: [], extensions: [], mcp: [] },
 		models: [],
 		modelIndex: -1,
-		// wallMs（首条→最后一条）只有 1 分钟，但会话已经开了 2 小时
-		stats: { ...base, wallMs: 60_000, sessionAgeMs: 2 * 60 * 60_000 },
+		// wallMs（首条→最后一条）只有 1 分钟，但会话创建于 2026-11-19 10:00:00
+		stats: { ...base, wallMs: 60_000, sessionAgeMs: 2 * 60 * 60_000, createdAt },
 	};
-	const rows = buildSessionInfoRows(view, theme, 80);
-	const text = rows.map((row) => strip(row.text)).join("\n");
-	assert.match(text, /2 h 0 m 0 s/, `时长应是创建→现在：\n${text}`);
-	assert.doesNotMatch(text, /1 m 0 s/, `不该显示 wallMs 的 1 分钟：\n${text}`);
+	const text = buildSessionInfoRows(view, theme, 100)
+		.map((row) => strip(row.text))
+		.join("\n");
+	assert.match(text, /创建/, `应显示「创建」标签：\n${text}`);
+	assert.match(text, /2026年11月19日 10时00分00秒/, `应显示完整日期时间：\n${text}`);
+	assert.doesNotMatch(text, /2 h 0 m 0 s/, `不该显示相对时长：\n${text}`);
 
-	// 拿不到创建时间（sessionAgeMs = 0）→ 退回 wallMs
-	const fallback = buildSessionInfoRows({ ...view, stats: { ...base, wallMs: 60_000, sessionAgeMs: 0 } }, theme, 80);
+	// 拿不到创建时间（createdAt = 0）→ 退回相对时长 wallMs
+	const fallback = buildSessionInfoRows(
+		{ ...view, stats: { ...base, wallMs: 60_000, sessionAgeMs: 0, createdAt: 0 } },
+		theme,
+		100,
+	);
 	const fallbackText = fallback.map((row) => strip(row.text)).join("\n");
-	assert.match(fallbackText, /1 m 0 s/, `无创建时间时应退回 wallMs：\n${fallbackText}`);
+	assert.match(fallbackText, /1 m 0 s/, `没有创建时间时应退回 wallMs：\n${fallbackText}`);
 });
