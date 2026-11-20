@@ -3401,3 +3401,44 @@ test("压缩文案按原因区分：手动 / 自动（阈值）/ 溢出恢复", 
 		unpatchSummaryStatusIndicators();
 	}
 });
+
+test("subagent 面板：运行中也能展开（Ctrl+O / 鼠标点击都走 setExpanded）", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	const results = Array.from({ length: 8 }, (_, i) =>
+		subagentChild({ agent: `a${i + 1}`, status: "running" }),
+	);
+	const details = { content: [{ type: "text", text: "" }], details: subagentDetails("parallel", results) };
+
+	const render = (expanded) =>
+		panel
+			.renderResult(
+				details,
+				{ expanded, isPartial: true },
+				theme,
+				panelContext({ isPartial: true, state: {}, expanded }),
+			)
+			.render(100)
+			.map(strip);
+
+	// 折叠：只显示前 3 个 + 「还有 5 个」
+	const collapsed = render(false);
+	assert.equal(
+		(collapsed.join("\n").match(/^ +\uF4BE a\d+ · /gm) ?? []).length,
+		3,
+		`折叠应只显示 3 块：\n${collapsed.join("\n")}`,
+	);
+	assert.match(collapsed.join("\n"), /还有 5 个子代理/, "折叠应有省略提示");
+
+	// 展开：全部 8 个、没有省略提示
+	const expanded = render(true);
+	assert.equal(
+		(expanded.join("\n").match(/^ +\uF4BE a\d+ · /gm) ?? []).length,
+		8,
+		`展开应显示全部 8 块：\n${expanded.join("\n")}`,
+	);
+	assert.doesNotMatch(expanded.join("\n"), /还有 \d+ 个子代理/, "展开后不该再有省略提示");
+});

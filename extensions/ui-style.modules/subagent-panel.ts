@@ -345,6 +345,13 @@ class MultiAgentView extends CachedView {
 	private readonly running: boolean;
 	/** 计划里的总数量（链式从 args.chain.length 来）。 */
 	private readonly expectedTotal: number | undefined;
+	/**
+	 * 展开态（Ctrl+O **或鼠标点击**都会让 pi 调 setExpanded → 这里拿到 true）。
+	 *
+	 * 运行中也要响应：以前这里写死 false，所以点击/快捷键都没反应，只有结束后展开
+	 * 才看得出来。展开后显示全部子代理（不再折叠成「还有 N 个」），执行窗口也放宽。
+	 */
+	private readonly expanded: boolean;
 
 	constructor(
 		details: SubagentDetailsLike,
@@ -352,6 +359,7 @@ class MultiAgentView extends CachedView {
 		theme: ThemeLike,
 		running: boolean,
 		expectedTotal?: number,
+		expanded = false,
 	) {
 		super();
 		this.details = details;
@@ -359,6 +367,7 @@ class MultiAgentView extends CachedView {
 		this.theme = theme;
 		this.running = running;
 		this.expectedTotal = expectedTotal;
+		this.expanded = expanded;
 	}
 
 	protected override cacheKey(): string {
@@ -366,7 +375,7 @@ class MultiAgentView extends CachedView {
 			.map((child) => `${child.status}:${child.usage.input}:${child.usage.output}`)
 			.join(",");
 		// 运行中带 50ms 帧号（扫光/耗时需要重画）；窗口已固定，不需要相位。
-		return `${this.details.mode}:${sig}:${this.running ? Math.floor(Date.now() / 50) : 0}`;
+		return `${this.details.mode}:${sig}:${this.expanded ? 1 : 0}:${this.running ? Math.floor(Date.now() / 50) : 0}`;
 	}
 
 	protected renderLines(width: number): string[] {
@@ -377,7 +386,7 @@ class MultiAgentView extends CachedView {
 		const selection =
 			this.details.mode === "chain"
 				? chainWindowChildren(this.details.results, false)
-				: windowedChildren(this.details.results, false);
+				: windowedChildren(this.details.results, this.expanded);
 		const { hidden, indices } = selection;
 		lines.push(
 			...renderCachedBlocks({
@@ -396,9 +405,12 @@ class MultiAgentView extends CachedView {
 						showTitle: true,
 						nest: CHILD_NEST,
 						index,
-						// 并行块一屏要放 3 个，执行内容只留 2 行；单个/链式保持 4 行。
+						// 并行块一屏要放 3 个，执行内容只留 2 行（展开态放宽到 4 行）；
+						// 单个/链式保持 4 行。
 						tailLines:
-							this.details.mode === "parallel" ? PARALLEL_TAIL_LINES : undefined,
+							this.details.mode === "parallel" && !this.expanded
+								? PARALLEL_TAIL_LINES
+								: undefined,
 					}).render(width),
 			}),
 		);
@@ -639,7 +651,14 @@ export function subagentPanel(): {
 						index: 0,
 					});
 				}
-				return new MultiAgentView(details, state, theme, true, expectedTotal);
+				return new MultiAgentView(
+					details,
+					state,
+					theme,
+					true,
+					expectedTotal,
+					options.expanded,
+				);
 			}
 			// 结束后：折叠摘要。
 			return new SubagentResultView(
