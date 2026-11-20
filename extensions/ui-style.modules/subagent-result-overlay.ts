@@ -33,6 +33,10 @@ import {
 } from "./subagent-data.ts";
 import type { SubagentChildLike } from "./subagent-data.ts";
 
+/** 内容区最小/最大宽度（字符列）。 */
+const MIN_CONTENT_WIDTH = 28;
+const MAX_CONTENT_WIDTH = 100;
+
 /** 弹窗内容：标题 + 只读结论。 */
 interface OverlayPayload {
 	/** 标题行（图标 + 名称 + 状态 + 耗时）。 */
@@ -99,24 +103,51 @@ export function childResultTitle(child: SubagentChildLike, elapsed?: string): st
  * 视觉与其它 overlay 保持一致（圆角边框、标题、底部提示），内容按宽度折行，
  * 支持 ↑↓ / PgUp PgDn / j k / g G 滚动，Esc / q 关闭。
  */
-class ChildResultOverlay implements Component {
+export class ChildResultOverlay implements Component {
 	private top = 0;
 	/** 折行后的正文（宽度变化时重算）。 */
 	private wrappedFor?: number;
 	private wrapped: string[] = [];
+	/** 内容宽度（不含边框/内边距），由最长行决定并夹在 [MIN_CONTENT, maxContent]。 */
+	private readonly contentWidth: number;
+	private readonly cols: number;
+	private readonly rows: number;
 
 	// 注意：不用 TS 的"参数属性"写法（`private readonly x` 直接写在参数里）——
 	// 那是**不可擦除语法**，pi 用 jiti / node --test 的 type-stripping 跑不了。
 	private readonly payload: OverlayPayload;
 	private readonly theme: Theme;
-	private readonly rows: number;
 	private readonly done: () => void;
 
-	constructor(payload: OverlayPayload, theme: Theme, rows: number, done: () => void) {
-		this.payload = payload;
-		this.theme = theme;
-		this.rows = rows;
-		this.done = done;
+	constructor(options: {
+		payload: OverlayPayload;
+		theme: Theme;
+		done: () => void;
+		cols: number;
+		rows: number;
+	}) {
+		this.payload = options.payload;
+		this.theme = options.theme;
+		this.done = options.done;
+		this.cols = options.cols;
+		this.rows = options.rows;
+		// 自动宽度：最长一行的可见宽度 + 边框与左右内边距（4 列）。
+		const natural = this.payload.body
+			.split("\n")
+			.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
+		const maxContent = Math.max(MIN_CONTENT_WIDTH, Math.min(this.cols - 6, MAX_CONTENT_WIDTH));
+		this.contentWidth = Math.max(MIN_CONTENT_WIDTH, Math.min(natural, maxContent));
+	}
+
+	/** 弹窗宽度（含边框与内边距）。 */
+	preferredWidth(): number {
+		return this.contentWidth + 4;
+	}
+
+	/** 弹窗高度（含上下边框）：内容有多少行就多高，最多到终端高度 - 2。 */
+	preferredHeight(): number {
+		const body = this.bodyLines(this.contentWidth + 4).length;
+		return Math.min(this.rows - 2, Math.max(1, body) + 4);
 	}
 
 	invalidate(): void {
@@ -126,8 +157,8 @@ class ChildResultOverlay implements Component {
 
 	/** 正文行（按内容宽度折行；已缓存）。 */
 	private bodyLines(width: number): string[] {
-		if (this.wrappedFor === width) return this.wrapped;
-		const contentWidth = Math.max(1, width - 4); // 两侧边框 + 各 1 空格
+		const contentWidth = Math.max(1, Math.min(this.contentWidth, width - 4));
+		if (this.wrappedFor === contentWidth) return this.wrapped;
 		const out: string[] = [];
 		for (const line of this.payload.body.split("\n")) {
 			if (line === "") {
@@ -136,19 +167,19 @@ class ChildResultOverlay implements Component {
 			}
 			out.push(...wrapTextWithAnsi(this.theme.fg("text", line), contentWidth));
 		}
-		this.wrappedFor = width;
+		this.wrappedFor = contentWidth;
 		this.wrapped = out;
 		return out;
 	}
 
-	/** 可见正文行数（扣掉顶/底边框与提示行）。 */
+	/** 可见正文行数：内容有多少显示多少，超过终端高度才滚动。 */
 	private viewport(): number {
-		return Math.max(1, Math.min(this.rows - 4, 40));
+		return Math.max(1, this.rows - 4);
 	}
 
 	handleInput(data: string): void {
 		if (isKeyRelease(data)) return;
-		if (matchesKey(data, "escape") || data === "q" || data === "Q") {
+		if (isCloseKey(data)) {
 			this.done();
 			return;
 		}
@@ -163,44 +194,42 @@ class ChildResultOverlay implements Component {
 
 	render(width: number): string[] {
 		const theme = this.theme;
-		const body = this.bodyLines(width);
-		const viewport = this.viewport();
-		const maxTop = Math.max(0, body.length - viewport);
-		this.top = Math.max(0, Math.min(this.top, maxTop));
-
-		const total = Math.max(8, width);
+		const total = Math.max(8, Math.min(width, this.preferredWidth()));
 		const inner = total - 4;
 		const border = DIM_GRAY;
+		const body = this.bodyLines(total);
+		// 高度自适应：内容多少就多高（上限 rows-2，超出则滚动）。
+		const viewport = Math.min(Math.max(1, body.length), this.viewport());
+		const maxTop = Math.max(0, body.length - viewport);
+		this.top = Math.max(0, Math.min(this.top, maxTop));
 
 		const titleText = truncateToWidth(this.payload.title, Math.max(0, total - 6), "…");
 		// "╭─ " = 3 列、标题后还有一个空格、末尾 "╮" = 1 列 → 填充 = total - 5 - 标题宽
 		const topFill = Math.max(0, total - 5 - visibleWidth(titleText));
-		const lines = [
-			`${border}╭─ ${titleText}${border} ${"─".repeat(topFill)}╮${RESET_FG}`,
-		];
+		const lines = [`${border}╭─ ${titleText}${border} ${"─".repeat(topFill)}╮${RESET_FG}`];
 
-		const slice = body.slice(this.top, this.top + viewport);
-		for (const line of slice) {
+		for (const line of body.slice(this.top, this.top + viewport)) {
 			lines.push(`${border}│${RESET_FG} ${padRight(line, inner)} ${border}│${RESET_FG}`);
-		}
-		// 内容不足时补空行，保证弹窗高度稳定（不随结论长短跳）。
-		for (let i = slice.length; i < viewport; i++) {
-			lines.push(`${border}│${RESET_FG} ${" ".repeat(inner)} ${border}│${RESET_FG}`);
 		}
 
 		const position =
-			body.length > viewport ? `  ${this.top + 1}-${Math.min(body.length, this.top + viewport)}/${body.length}` : "";
+			body.length > viewport
+				? `  ${this.top + 1}-${Math.min(body.length, this.top + viewport)}/${body.length}`
+				: "";
 		const hint = truncateToWidth(
 			`${theme.fg("muted", `↑↓ 滚动 · Esc 关闭${position}`)}`,
 			Math.max(0, total - 5),
 			"…",
 		);
 		const bottomFill = Math.max(0, total - 5 - visibleWidth(hint));
-		lines.push(
-			`${border}╰─ ${hint}${border} ${"─".repeat(bottomFill)}╯${RESET_FG}`,
-		);
+		lines.push(`${border}╰─ ${hint}${border} ${"─".repeat(bottomFill)}╯${RESET_FG}`);
 		return lines;
 	}
+}
+
+/** 关闭键：Esc（含 CSI 变体）/ q / Q。 */
+function isCloseKey(data: string): boolean {
+	return matchesKey(data, "escape") || data === "q" || data === "Q";
 }
 
 /** 把一行补到指定宽度（弹窗正文已由 wrapTextWithAnsi 保证不超宽）。 */
@@ -220,19 +249,46 @@ export async function showChildResultOverlay(
 		title: childResultTitle(child, elapsed),
 		body: childResultText(child),
 	};
+
+	let overlay: ChildResultOverlay | undefined;
 	await ui.custom(
-		(tui: TUI, theme: Theme, _keybindings: unknown, done: () => void) =>
-			new ChildResultOverlay(
-				payload,
-				theme,
-				(tui as unknown as { terminal?: { rows?: number } }).terminal?.rows ?? 24,
-				() => done(),
-			),
+		(tui: TUI, theme: Theme, _keybindings: unknown, done: () => void) => {
+			const terminal = (tui as unknown as { terminal?: { columns?: number; rows?: number } })
+				.terminal;
+			const cols = terminal?.columns ?? 80;
+			const rows = terminal?.rows ?? 24;
+
+			// 关闭路径要**可靠**：overlay 的焦点可能被鼠标事件/其他组件抢走，
+			// 所以除了组件的 handleInput，再挂一个 TUI 级输入监听（它在焦点分发之前跑），
+			// Esc/q 一定关得掉；关闭时把它摘掉，避免泄漏。
+			let unsubscribe: (() => void) | undefined;
+			let closed = false;
+			const close = (): void => {
+				if (closed) return;
+				closed = true;
+				unsubscribe?.();
+				unsubscribe = undefined;
+				done();
+			};
+			unsubscribe = (
+				tui as unknown as {
+					addInputListener?: (listener: (data: string) => unknown) => () => void;
+				}
+			).addInputListener?.((data: string) => {
+				if (isKeyRelease(data) || !isCloseKey(data)) return undefined;
+				close();
+				return { consume: true };
+			});
+
+			overlay = new ChildResultOverlay({ payload, theme, done: close, cols, rows });
+			return overlay;
+		},
 		{
 			overlay: true,
+			// 尺寸按内容自动算：宽度取最长一行（夹在 28~100 列），高度按内容行数。
 			overlayOptions: () => ({
-				width: "72%",
-				maxHeight: "80%",
+				width: overlay?.preferredWidth() ?? MIN_CONTENT_WIDTH + 4,
+				maxHeight: overlay?.preferredHeight() ?? 24,
 				anchor: "center",
 				margin: 1,
 			}),

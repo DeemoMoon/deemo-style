@@ -3521,3 +3521,88 @@ test("子代理结果弹窗：完成后点击某个块 → 弹窗只显示结论
 
 	overlayMod.setOverlayUiForTest(undefined);
 });
+
+test("子代理结果弹窗：按内容自动尺寸，且 Esc/q 通过输入监听一定能关", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	const overlayMod = await import("../subagent-result-overlay.ts");
+
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	const mkChild = (conclusion) =>
+		subagentChild({
+			agent: "scout",
+			messages: [{ role: "assistant", content: [{ type: "text", text: conclusion }] }],
+		});
+
+	// 假 ui：记录每次弹窗的 factory 与 overlayOptions
+	const opened = [];
+	overlayMod.setOverlayUiForTest({
+		custom: async (factory, options) => {
+			const theme = { fg: (_t, x) => x };
+			const listeners = [];
+			const tui = {
+				terminal: { columns: 100, rows: 30 },
+				addInputListener: (fn) => {
+					listeners.push(fn);
+					return () => listeners.splice(listeners.indexOf(fn), 1);
+				},
+			};
+			let closedTimes = 0;
+			const done = () => { closedTimes += 1; };
+			const component = factory(tui, theme, {}, done);
+			opened.push({ component, options, listeners, done: () => closedTimes });
+		},
+	});
+
+	const result = {
+		content: [{ type: "text", text: "" }],
+		details: subagentDetails("parallel", [mkChild("短结论。"), mkChild("第二条结论。")]),
+	};
+	const view = panel.renderResult(result, { expanded: false, isPartial: false }, theme, panelContext({ isPartial: false }));
+	const lines = view.render(100).map(strip);
+	const y = lines.findIndex((line) => /scout · /.test(line));
+	view.handleMouse({ type: "click", button: "left", x: 4, y, width: 100, height: lines.length });
+	await new Promise((r) => setTimeout(r, 0));
+
+	const entry = opened[0];
+	assert.ok(entry, "应打开弹窗");
+	const { component, options } = entry;
+
+	// ① 自动宽度：短结论 → 窄窗（远小于终端 100 列），但至少 MIN+4
+	const width = options.overlayOptions().width;
+	const minWidth = 28 + 4;
+	assert.ok(width >= minWidth, `宽度应 >= ${minWidth}，实际 ${width}`);
+	assert.ok(width < 60, `短结论不该用整屏宽度，实际 ${width}`);
+
+	// ② 自动高度：内容短 → 高度=行数+边框，且不超终端
+	const height = options.overlayOptions().maxHeight;
+	assert.equal(height, 1 + 4, `1 行内容 + 上下边框 = 5，实际 ${height}`);
+
+	// ③ 长内容：宽度封顶 100、高度不超终端
+	const longChild = mkChild("很长的结论".repeat(60));
+	const longOverlay = new (component.constructor)({
+		payload: { title: "t", body: overlayMod.childResultText(longChild) },
+		theme: { fg: (_t, x) => x },
+		done: () => {},
+		cols: 200,
+		rows: 20,
+	});
+	assert.equal(longOverlay.preferredWidth(), 100 + 4, "宽度应封顶 100 列内容 + 4 边框");
+	assert.ok(longOverlay.preferredHeight() <= 18, `高度不应超过终端 - 2，实际 ${longOverlay.preferredHeight()}`);
+	// 渲染行宽一致
+	const rendered = longOverlay.render(longOverlay.preferredWidth());
+	const widths = new Set(rendered.map((line) => visibleWidth(line)));
+	assert.equal(widths.size, 1, `长内容弹窗每行宽度应一致：${[...widths].join(",")}`);
+
+	// ④ Esc / q 通过 TUI 输入监听关闭（不依赖焦点）
+	assert.equal(entry.listeners.length, 1, "应挂一个输入监听");
+	const listener = entry.listeners[0];
+	assert.deepEqual(listener("\x1b"), { consume: true }, "Esc 应被消费");
+	assert.equal(entry.done(), 1, "Esc 应触发关闭");
+	listener("q");
+	assert.equal(entry.done(), 1, "已关闭后重复按键不应再触发");
+
+	overlayMod.setOverlayUiForTest(undefined);
+});
