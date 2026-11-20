@@ -3158,6 +3158,7 @@ test("压缩中指示：5 行窗口按时间自动下滚（流式观感）", asy
 		SUMMARY_WINDOW_LINES,
 		SUMMARY_SCROLL_MS,
 	} = await import("../summary-blocks.ts");
+	const { ICON_CLOCK } = await import("../core.ts");
 
 	// 从 preparation 抽文本（只看 text 块，忽略工具调用）
 	const source = textsFromPreparation({
@@ -3224,10 +3225,16 @@ test("摘要/压缩指示器：文案换成「摘要生成中」/「压缩上下
 	const { ICON_CLOCK } = await import("../core.ts");
 
 	patchSummaryStatusIndicators();
+	const realNow = Date.now;
+	// 首帧会记开始时间并隐藏 "0ms"；再推进 1.8s 渲染出耗时。
 	const make = (kind) => {
 		const loader = new Loader(undefined, (t) => t, (t) => t);
 		loader.kind = kind;
 		loader.updateDisplay();
+		const t0 = Date.now();
+		Date.now = () => t0 + 1800;
+		loader.updateDisplay();
+		Date.now = realNow;
 		return loader;
 	};
 	const branch = make("branchSummary");
@@ -3244,8 +3251,8 @@ test("摘要/压缩指示器：文案换成「摘要生成中」/「压缩上下
 		const compactionText = compaction.render(80).map(strip).join("\n");
 		assert.ok(compactionText.includes(COMPACTION_TEXT), `应显示「压缩上下文中」：\n${compactionText}`);
 		assert.ok(!compactionText.includes("Compacting context"), `不该再有 pi 的英文文案：\n${compactionText}`);
-		assert.ok(!compactionText.includes(ICON_CLOCK), `压缩指示不应有时钟图标：\n${compactionText}`);
-		assert.doesNotMatch(compactionText, /\d+\.\d+s/, `压缩指示不应有耗时数字：\n${compactionText}`);
+		assert.ok(compactionText.includes(ICON_CLOCK), `压缩指示应有时钟图标：\n${compactionText}`);
+		assert.match(compactionText, /\d+\.\d+s|\d+ms/, `压缩指示应有耗时：\n${compactionText}`);
 
 		// ③ 都是月相 + 呼吸换色
 		for (const text of [branchText, compactionText]) {

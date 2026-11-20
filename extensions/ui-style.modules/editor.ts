@@ -21,7 +21,10 @@ import {
 	BOLD_OFF,
 	BOLD_ON,
 	CORAL,
+	formatPanelDuration,
+	ICON_CLOCK,
 	mixRgb,
+	MUTED,
 	RESET_FG,
 	sgr,
 	SKY_BLUE,
@@ -148,8 +151,10 @@ export function patchSummaryStatusIndicators(): void {
 				this.restartAnimation?.();
 			}
 			const elapsed = Date.now() - (this.__uiStyleStart ?? Date.now());
-			// 只有文案；时钟/耗时留给完成后的摘要块，这里不显示。
-			this.message = workingMessage(elapsed, text);
+			// 呼吸文案 + 行尾时钟与耗时（与压缩块标题同一口径）。
+			// 首帧（<16ms）先不显示，避免闪一下 "0ms"。
+			const timer = elapsed < 16 ? "" : ` · ${ICON_CLOCK} ${formatPanelDuration(elapsed)}`;
+			this.message = `${workingMessage(elapsed, text)}${timer === "" ? "" : MUTED + timer + RESET_FG}`;
 		}
 		originalUpdateDisplay.call(this);
 	};

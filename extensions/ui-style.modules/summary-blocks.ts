@@ -424,8 +424,17 @@ export class CompactionIndicatorView extends CachedView {
 	}
 
 	protected renderLines(width: number): string[] {
+		const elapsedMs = this.clock.startedAt === undefined ? 0 : Date.now() - this.clock.startedAt;
 		const plain = `${ICON_COMPACTION} 压缩中`;
-		const title = `${BOLD_ON}${shimmerText(plain, COMPACTION_ACCENT, this.clock.startedAt)}${BOLD_OFF}${RESET_FG}`;
+		// 标题扫光（含图标与"压缩中"）+ **行尾时钟与耗时**（不参与扫光，保持可读）。
+		// 首帧（<16ms）不显示耗时，避免闪一下 "0ms"（与 liveClockText 同口径）。
+		const timer =
+			elapsedMs < 16
+				? ""
+				: ` · ${ICON_CLOCK} ${formatPanelDuration(elapsedMs)}`;
+		const title =
+			`${BOLD_ON}${shimmerText(plain, COMPACTION_ACCENT, this.clock.startedAt)}${BOLD_OFF}` +
+			`${sgr(COMPACTION_ACCENT)}${timer}${RESET_FG}`;
 		const lines = [`${UI_INDENT}${title}`];
 
 		const contentWidth = Math.max(1, width - UI_INDENT.length - PREVIEW_CONNECTOR_REST.length);
