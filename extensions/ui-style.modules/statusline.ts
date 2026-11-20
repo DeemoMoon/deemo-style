@@ -36,6 +36,7 @@ import {
 import {
 	createSessionStatsComputer,
 	emptyStats,
+	sessionCreatedAt,
 	type SessionStats,
 	type StatEntryLike,
 } from "./session-stats.ts";
@@ -181,7 +182,11 @@ class StatusLineFooter implements Component {
 		// compaction）才重算；否则连整表浅拷贝都省掉。
 		if (leafId !== this.statsLeafId) {
 			this.statsLeafId = leafId;
-			this.stats = this.computeStats(manager.getBranch() as unknown as StatEntryLike[]);
+			this.stats = this.computeStats(
+				manager.getBranch() as unknown as StatEntryLike[],
+				Date.now(),
+				sessionCreatedAt(manager),
+			);
 		}
 
 		this.contextUsage = contextUsageCached(this.ctx);

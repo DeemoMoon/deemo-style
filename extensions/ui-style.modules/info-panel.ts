@@ -11,7 +11,8 @@
  * 键盘、关掉就消失，不占常驻空间。
  *
  * 数据口径：
- *   - 时长 / 分支 → `computeSessionStats(getBranch())` 的 `wallMs`（与状态栏同一份实现）；
+ *   - 时长 → **会话创建 → 现在**（`sessionAgeMs`，取自会话 header 时间戳；拿不到时退回
+ *     `wallMs`）；分支 → `computeSessionStats(getBranch())`（与状态栏同一份实现）；
  *   - 模型/思考 → `ctx.model` / `pi.getThinkingLevel()`；
  *   - 技能 / 扩展 / MCP → `collectSessionResources()`（startup.ts，与启动页共享
  *     扫描缓存；MCP 另读用户级/项目级 mcp.json 与 `pi.getMcpServers()`）；
@@ -65,7 +66,7 @@ import {
 	WARN_YELLOW,
 } from "./core.ts";
 import { supportedThinkingLevels, THINKING_COLORS } from "./levels.ts";
-import { computeSessionStats, type SessionStats } from "./session-stats.ts";
+import { computeSessionStats, sessionCreatedAt, type SessionStats } from "./session-stats.ts";
 import { collectSessionResources, type SessionResources } from "./startup.ts";
 
 /** 弹窗宽度策略：内容宽度 = 最长一行，夹在 [MIN_INNER, max] 之间。 */
@@ -209,7 +210,12 @@ export function collectSessionInfoView(
 		thought: thinking,
 		sessionName: ctx.sessionManager.getSessionName() ?? "",
 		cwd: ctx.sessionManager.getCwd() || ctx.cwd,
-		stats: computeSessionStats(branch, now),
+		// 时长 = 会话创建 → 现在（比 wallMs 的"首条→最后一条"更贴近"开了多久"）。
+		stats: computeSessionStats(
+			branch,
+			now,
+			sessionCreatedAt(ctx.sessionManager as unknown as { getHeader?(): { timestamp?: string } | null }),
+		),
 		entryCount: branch.length,
 		resources,
 		models,
@@ -423,7 +429,11 @@ export function buildSessionInfoRows(
 	rows.push({
 		text: cellsLine(
 			[
-				{ label: "时长", value: plain(formatDuration(stats.wallMs)) },
+				// 会话创建 → 现在；拿不到创建时间时退回 wallMs（首条→最后一条）。
+				{
+					label: "时长",
+					value: plain(formatDuration(stats.sessionAgeMs > 0 ? stats.sessionAgeMs : stats.wallMs)),
+				},
 				{ label: "分支", value: plain(`${view.entryCount} 条目`) },
 			],
 			inner,

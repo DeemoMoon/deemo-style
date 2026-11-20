@@ -9,9 +9,11 @@
  *   - `message` 里 assistant / toolResult 的 usage
  *   - `branch_summary` / `compaction` 的 usage（摘要本身也是一次调用）
  *
- * 时间口径（两个不同的数，别混）：
+ * 时间口径（三个不同的数，别混）：
  *   - `activeMs`：逐轮累加"用户提问 → 该轮最后一个条目"，即真正在生成/执行的时间；
- *   - `wallMs`：首条 → 最后一条的墙钟跨度，包含用户思考和中途离开。
+ *   - `wallMs`：首条 → 最后一条的墙钟跨度，包含用户思考和中途离开；
+ *   - `sessionAgeMs`：**会话创建 → 现在**的时长（由调用方传入创建时间），
+ *     用于信息面板的"时长"——它比 `wallMs` 更符合"这个会话开了多久"的直觉。
  */
 
 import { promptTokens, type InfoMessageLike, type UsageLike } from "./core.ts";
@@ -52,6 +54,8 @@ export interface SessionStats {
 	activeMs: number;
 	/** 首条 → 最后一条的墙钟跨度（毫秒）。 */
 	wallMs: number;
+	/** 会话创建 → 现在（毫秒）；拿不到创建时间时为 0。 */
+	sessionAgeMs: number;
 }
 
 /**
@@ -76,6 +80,7 @@ export function emptyStats(): SessionStats {
 		turnCount: 0,
 		activeMs: 0,
 		wallMs: 0,
+		sessionAgeMs: 0,
 	};
 }
 
@@ -213,6 +218,8 @@ function finalizeStats(stats: SessionStats, tracker: TurnTracker, now: number): 
 export function createSessionStatsComputer(): (
 	entries: readonly StatEntryLike[],
 	now?: number,
+	/** 会话创建时间（毫秒）；给了就填 `sessionAgeMs`。 */
+	createdAt?: number,
 ) => SessionStats {
 	let computedLength = 0;
 	let lastEntry: StatEntryLike | undefined;
@@ -223,7 +230,11 @@ export function createSessionStatsComputer(): (
 	/** 全量重算间隔（调用次数）。 */
 	const FULL_RECOMPUTE_EVERY = 20;
 
-	return (entries: readonly StatEntryLike[], now: number = Date.now()): SessionStats => {
+	return (
+		entries: readonly StatEntryLike[],
+		now: number = Date.now(),
+		createdAt?: number,
+	): SessionStats => {
 		sinceFullRecompute += 1;
 		// 前缀续算只校验"最后一个已算条目还是同一个对象"，挡不住"历史条目被就地改写"
 		// （compaction/会话编辑会改 timestamp）。周期性全量重算兜底，成本摊薄后无感。
@@ -251,13 +262,38 @@ export function createSessionStatsComputer(): (
 		// 缓存里的 base 只保留"已完成条目"的累积。
 		const stats: SessionStats = { ...base };
 		finalizeStats(stats, tracker, now);
+		stats.sessionAgeMs =
+			createdAt === undefined || !Number.isFinite(createdAt) || createdAt <= 0
+				? 0
+				: Math.max(0, now - createdAt);
 		return stats;
 	};
+}
+
+/**
+ * 会话创建时间（毫秒）——取自会话文件的 header 时间戳。
+ *
+ * `getHeader()` 拿不到（老会话 / 内存会话）时返回 undefined，调用方按 0 处理，
+ * 不伪造"从 1970 开始"的时长。
+ */
+export function sessionCreatedAt(
+	manager: { getHeader?(): { timestamp?: string } | null } | undefined,
+): number | undefined {
+	try {
+		const header = manager?.getHeader?.();
+		if (typeof header?.timestamp !== "string") return undefined;
+		const parsed = Date.parse(header.timestamp);
+		return Number.isFinite(parsed) ? parsed : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 export function computeSessionStats(
 	entries: readonly StatEntryLike[],
 	now: number = Date.now(),
+	/** 会话创建时间（毫秒）；给了就填 `sessionAgeMs`。 */
+	createdAt?: number,
 ): SessionStats {
 	const stats = emptyStats();
 	// 单遍遍历：usage 统计与时间累计共用同一条 entry（每条只 Date.parse 一次）。
@@ -267,5 +303,9 @@ export function computeSessionStats(
 		trackEntryTime(stats, tracker, entry);
 	}
 	finalizeStats(stats, tracker, now);
+	stats.sessionAgeMs =
+		createdAt === undefined || !Number.isFinite(createdAt) || createdAt <= 0
+			? 0
+			: Math.max(0, now - createdAt);
 	return stats;
 }

@@ -3714,3 +3714,31 @@ test("子代理结果弹窗：滚轮滚动生效、连点只开一个窗口", as
 	assert.equal(opened, 1, `连点只应打开一个弹窗，实际 ${opened}`);
 	setOverlayUiForTest(undefined);
 });
+
+test("信息面板：时长显示会话创建到现在，而不是首条→最后一条", async () => {
+	const { buildSessionInfoRows } = await import("../info-panel.ts");
+	const { emptyStats } = await import("../session-stats.ts");
+
+	const base = emptyStats();
+	const view = {
+		model: undefined,
+		thought: "high",
+		sessionName: "长会话",
+		cwd: "/tmp",
+		entryCount: 3,
+		resources: { skills: [], extensions: [], mcp: [] },
+		models: [],
+		modelIndex: -1,
+		// wallMs（首条→最后一条）只有 1 分钟，但会话已经开了 2 小时
+		stats: { ...base, wallMs: 60_000, sessionAgeMs: 2 * 60 * 60_000 },
+	};
+	const rows = buildSessionInfoRows(view, theme, 80);
+	const text = rows.map((row) => strip(row.text)).join("\n");
+	assert.match(text, /2 h 0 m 0 s/, `时长应是创建→现在：\n${text}`);
+	assert.doesNotMatch(text, /1 m 0 s/, `不该显示 wallMs 的 1 分钟：\n${text}`);
+
+	// 拿不到创建时间（sessionAgeMs = 0）→ 退回 wallMs
+	const fallback = buildSessionInfoRows({ ...view, stats: { ...base, wallMs: 60_000, sessionAgeMs: 0 } }, theme, 80);
+	const fallbackText = fallback.map((row) => strip(row.text)).join("\n");
+	assert.match(fallbackText, /1 m 0 s/, `无创建时间时应退回 wallMs：\n${fallbackText}`);
+});

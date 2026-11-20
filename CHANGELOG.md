@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.18] - 2026-11-20
+
+### 信息面板的「时长」改成会话创建到现在
+- 之前用 `wallMs`（首条 → 最后一条），只反映"消息跨度"，不含开场前的空闲、
+  也不含最后一条之后的思考时间。现在新增 `SessionStats.sessionAgeMs`：
+  **会话创建 → 现在**，取自会话文件 header 的 `timestamp`。
+- 新增 `sessionCreatedAt(manager)` 解析 header 时间（拿不到 / 坏值 / 抛错都返回
+  `undefined`，不伪造"从 1970 开始"的时长）。
+- 信息面板：`sessionAgeMs > 0` 用它，否则退回 `wallMs`（老会话没有 header 时不显示假数据）。
+- `wallMs` / `activeMs` 语义不变（仍是"消息跨度"与"生成/执行累计"），三者在
+  `session-stats.ts` 顶部注释里各自说明用途。
+
 ## [1.3.17] - 2026-11-20
 
 ### 一轮代码审查修复：回放计时、弹窗交互、缓存与边界

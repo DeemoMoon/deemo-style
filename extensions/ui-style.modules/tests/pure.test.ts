@@ -1003,3 +1003,49 @@ test("本轮性能/正确性修复的纯函数回归", async () => {
 	// 放不下时保住文件名
 	assert.ok(shortenPathLine(path, 20).endsWith("file.ts"), shortenPathLine(path, 20));
 });
+
+test("sessionCreatedAt / sessionAgeMs：时长按会话创建时间算，拿不到时退回 wallMs", async () => {
+	const { sessionCreatedAt, computeSessionStats, createSessionStatsComputer } = await import(
+		"../session-stats.ts"
+	);
+
+	// ① 从 header 时间戳解析
+	const created = Date.parse("2026-11-19T10:00:00.000Z");
+	assert.equal(
+		sessionCreatedAt({ getHeader: () => ({ timestamp: "2026-11-19T10:00:00.000Z" }) }),
+		created,
+	);
+	// 拿不到 / 坏值 / 抛错 → undefined（不伪造）
+	assert.equal(sessionCreatedAt(undefined), undefined);
+	assert.equal(sessionCreatedAt({ getHeader: () => null }), undefined);
+	assert.equal(sessionCreatedAt({ getHeader: () => ({ timestamp: "not-a-date" }) }), undefined);
+	assert.equal(
+		sessionCreatedAt({ getHeader: () => { throw new Error("boom"); } }),
+		undefined,
+	);
+
+	// ② sessionAgeMs = now - createdAt
+	const now = created + 90 * 60_000; // 1.5 小时后
+	const stats = computeSessionStats([], now, created);
+	assert.equal(stats.sessionAgeMs, 90 * 60_000);
+
+	// ③ 没有创建时间 → 0（不显示假的时长）
+	assert.equal(computeSessionStats([], now).sessionAgeMs, 0);
+	assert.equal(computeSessionStats([], now, 0).sessionAgeMs, 0);
+	// 创建时间在未来（时钟偏差）→ 钳到 0，不出现负数
+	assert.equal(computeSessionStats([], now, now + 60_000).sessionAgeMs, 0);
+
+	// ④ 增量计算器同样支持
+	const compute = createSessionStatsComputer();
+	assert.equal(compute([], now, created).sessionAgeMs, 90 * 60_000);
+	assert.equal(compute([], now).sessionAgeMs, 0);
+
+	// ⑤ wallMs 语义不变（首条 → 最后一条），两者是独立的数
+	const entries = [
+		{ type: "message", timestamp: "2026-11-19T10:10:00.000Z", message: { role: "user" } },
+		{ type: "message", timestamp: "2026-11-19T10:20:00.000Z", message: { role: "assistant" } },
+	];
+	const both = computeSessionStats(entries, now, created);
+	assert.equal(both.wallMs, 10 * 60_000, "wallMs 仍是首条→最后一条");
+	assert.equal(both.sessionAgeMs, 90 * 60_000, "sessionAgeMs 是创建→现在");
+});
