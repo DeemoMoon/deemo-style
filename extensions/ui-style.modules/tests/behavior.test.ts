@@ -2601,31 +2601,20 @@ test("subagent 面板：进度点只两种字形（●实心/○空心），四�
 	}
 });
 
-test("subagent 面板：8 个任务只显示 3 个块，运行中循环轮播、展开看全部", async () => {
-	const {
-		registerSubagentPanel,
-		windowedChildren,
-	} = await import("../subagent-panel.ts");
+test("subagent 面板：8 个任务只显示前 3 个块 + 还有 5 个，展开看全部（不轮播）", async () => {
+	const { registerSubagentPanel, windowedChildren } = await import("../subagent-panel.ts");
 
-	// 纯函数：窗口选择
+	// 纯函数：固定前 3，不随时间变化
 	const items = ["a", "b", "c", "d", "e", "f", "g", "h"];
-	const short = windowedChildren(items, false, true, 0);
+	const short = windowedChildren(items, false);
 	assert.deepEqual(short.visible, ["a", "b", "c"], "窗口应是前 3 个");
+	assert.deepEqual(short.indices, [0, 1, 2]);
 	assert.equal(short.hidden, 5, "应提示还有 5 个");
-	// 轮播：时间推进后起点跟着走（并可环绕）
-	const later = windowedChildren(items, false, true, 2500);
-	assert.deepEqual(later.visible, ["b", "c", "d"], "一个间隔后应往后挪一个");
-	const wrapped = windowedChildren(items, false, true, 2500 * 7);
-	assert.deepEqual(wrapped.visible, ["h", "a", "b"], "越过末尾应环绕");
-	// 运行中随相位前进
-	assert.deepEqual(windowedChildren(items, false, true, 2500 * 2).visible, ["c", "d", "e"]);
-	// 结束后固定第一屏（不轮播）
-	assert.deepEqual(windowedChildren(items, false, false, 2500 * 5).visible, ["a", "b", "c"]);
 	// 展开态全给
-	assert.equal(windowedChildren(items, true, true, 0).visible.length, 8);
-	assert.equal(windowedChildren(items, true, true, 0).hidden, 0);
+	assert.equal(windowedChildren(items, true).visible.length, 8);
+	assert.equal(windowedChildren(items, true).hidden, 0);
 	// 数量不超过窗口时不隐藏
-	assert.equal(windowedChildren(["a", "b"], false, true, 0).hidden, 0);
+	assert.equal(windowedChildren(["a", "b"], false).hidden, 0);
 
 	// 真实渲染
 	let resolver;
@@ -2636,63 +2625,72 @@ test("subagent 面板：8 个任务只显示 3 个块，运行中循环轮播、
 	);
 	const details = { content: [{ type: "text", text: "" }], details: subagentDetails("parallel", results) };
 
-	const realNow = Date.now;
-	try {
-		Date.now = () => 10_000;
-		const collapsed = panel
+	const collapsed = panel
+		.renderResult(details, { expanded: false, isPartial: false }, theme, panelContext({ isPartial: false }))
+		.render(100)
+		.map(strip)
+		.join("\n");
+	const titles = collapsed.match(/^ +\uF4BE a\d+ · /gm) ?? [];
+	assert.equal(titles.length, 3, `应只渲染 3 个块：\n${collapsed}`);
+	assert.match(collapsed, /还有 5 个子代理/, `应提示剩余数量：\n${collapsed}`);
+	assert.doesNotMatch(collapsed, /循环显示/, "不该再提「循环显示」");
+
+	// 多次渲染（等价于多帧）窗口内容不变 —— 不轮播
+	const again = strip(
+		panel
 			.renderResult(details, { expanded: false, isPartial: false }, theme, panelContext({ isPartial: false }))
 			.render(100)
 			.map(strip)
-			.join("\n");
-		// 只应出现 3 个块标题 + 一行"还有 5 个"
-		const titles = collapsed.match(/^ +\uF4BE a\d+ · /gm) ?? [];
-		assert.equal(titles.length, 3, `应只渲染 3 个块：\n${collapsed}`);
-		assert.match(collapsed, /还有 5 个子代理/, `应提示剩余数量：\n${collapsed}`);
+			.join("\n"),
+	);
+	assert.equal(again, collapsed, "同一数据多次渲染，窗口内容应完全一致");
 
-		const expanded = panel
-			.renderResult(details, { expanded: true, isPartial: false }, theme, panelContext({ isPartial: false }))
-			.render(100)
-			.map(strip)
-			.join("\n");
-		assert.equal(
-			(expanded.match(/^ +\uF4BE a\d+ · /gm) ?? []).length,
-			8,
-			`展开应显示全部 8 个块：\n${expanded}`,
-		);
-		assert.doesNotMatch(expanded, /还有 \d+ 个子代理/, "展开态不该再有省略提示");
-	} finally {
-		Date.now = realNow;
-	}
+	const expanded = panel
+		.renderResult(details, { expanded: true, isPartial: false }, theme, panelContext({ isPartial: false }))
+		.render(100)
+		.map(strip)
+		.join("\n");
+	assert.equal(
+		(expanded.match(/^ +\uF4BE a\d+ · /gm) ?? []).length,
+		8,
+		`展开应显示全部 8 个块：\n${expanded}`,
+	);
+	assert.doesNotMatch(expanded, /还有 \d+ 个子代理/, "展开态不该再有省略提示");
 });
 
-test("subagent 面板：轮播间隔 2.5s，运行中前进、结束后固定第一屏", async () => {
-	const { windowedChildren } = await import("../subagent-panel.ts");
-	const items = ["a", "b", "c", "d", "e", "f", "g", "h"];
+test("subagent 面板：并行块执行内容窗口固定 2 行（单个/链式仍是 4 行）", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
 
-	// 2.5s 一档
-	assert.deepEqual(windowedChildren(items, false, true, 0).visible, ["a", "b", "c"]);
-	assert.deepEqual(windowedChildren(items, false, true, 2500).visible, ["b", "c", "d"]);
-	assert.deepEqual(windowedChildren(items, false, true, 5000).visible, ["c", "d", "e"]);
+	const many = Array.from({ length: 6 }, (_, i) => ({ type: "text", text: `内容 ${i + 1}` }));
+	const mk = (agent) =>
+		subagentChild({ agent, status: "running", messages: [{ role: "assistant", content: many }] });
 
-	// 半档不切换
-	assert.deepEqual(windowedChildren(items, false, true, 2499).visible, ["a", "b", "c"]);
+	const render = (mode, results) =>
+		panel
+			.renderResult(
+				{ content: [{ type: "text", text: "" }], details: subagentDetails(mode, results) },
+				{ expanded: false, isPartial: true },
+				theme,
+				panelContext({ isPartial: true, state: {} }),
+			)
+			.render(100)
+			.map(strip);
 
-	// 环形
-	assert.deepEqual(windowedChildren(items, false, true, 2500 * 7).visible, ["h", "a", "b"]);
+	// 并行：每块「标题 + 任务 + 2 行内容 + 底行」
+	const parallel = render("parallel", [mk("a")]);
+	const contentLines = parallel.filter((line) => /内容 \d/.test(line));
+	assert.equal(contentLines.length, 2, `并行执行内容窗口应为 2 行：\n${parallel.join("\n")}`);
 
-	// 结束后不轮播：任何时间都固定第一屏
-	for (const t of [0, 2500, 2500 * 3, 2500 * 7]) {
-		assert.deepEqual(
-			windowedChildren(items, false, false, t).visible,
-			["a", "b", "c"],
-			`结束态 t=${t} 应固定第一屏`,
-		);
-	}
-
-	// 恒定只显示 3 个
-	for (let i = 0; i < 16; i++) {
-		assert.equal(windowedChildren(items, false, true, 2500 * i).visible.length, 3);
-	}
+	// 单个：仍是 4 行（标题在 renderCall 里，这里只数内容）
+	const single = render("single", [mk("b")]);
+	assert.equal(
+		single.filter((line) => /内容 \d/.test(line)).length,
+		4,
+		`单个执行内容窗口应为 4 行：\n${single.join("\n")}`,
+	);
 });
 
 test("subagent 面板：链式只显示当前步骤，任务（含 {previous}）完整显示", async () => {
@@ -2952,7 +2950,8 @@ test("subagent 面板：块渲染按签名缓存（同一帧数据不重复渲�
 	const first = panel.renderResult(details, { expanded: false, isPartial: true }, theme, ctx).render(100);
 	const cache = state.blockCache;
 	assert.ok(cache instanceof Map, "应建立块渲染缓存");
-	assert.equal(cache.size, 8, `8 个子代理都应有缓存条目，实际 ${cache.size}`);
+	// 只有窗口内的 3 块会被渲染/缓存（不再为量高度把 8 块都渲一遍——这是性能改进）
+	assert.equal(cache.size, 3, `只应缓存窗口内的 3 块，实际 ${cache.size}`);
 
 	// 第二次渲染（同数据）：行数一致，且缓存条目里的 lines 是同一个数组（命中，不重渲）
 	const before = cache.get("child:0").lines;

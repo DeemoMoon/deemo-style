@@ -246,7 +246,7 @@ export class AgentBlockView extends CachedView {
 			options.theme,
 			// 任务行已经占了 ⎿，窗口内容全部走等宽续行前缀（一层里不要两个 ⎿）。
 			{
-				maxLines: SUBAGENT_TAIL_LINES,
+				maxLines: options.tailLines ?? SUBAGENT_TAIL_LINES,
 				cursor: this.running,
 				firstConnector: false,
 				indent: options.nest ?? "",

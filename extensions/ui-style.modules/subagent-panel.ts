@@ -109,37 +109,25 @@ const DOT_CELL_WIDTH = 1;
 const DOT_PENDING_RGB: Rgb = [110, 110, 110];
 
 /**
- * 固定窗口：一次最多显示几个子代理块，其余靠轮播。
+ * 固定窗口：一次最多显示几个子代理块，其余折叠成「还有 N 个」。
  *
- * 8 个任务时每块 4~5 行，全铺出来 40 行，把整屏都占了。改成窗口 3 块 + 轮播：
- * 高度恒定、能挨个看到每个子代理，完整列表按 Ctrl+O 展开。
+ * **不轮播**：早期做过"每 2.5s 往后挪一格"，但每换一屏窗口内容整体变一次、屏幕
+ * 跟着重排（等高补齐也挡不住），读起来很吵。现在固定显示**前 N 个**，其余按
+ * Ctrl+O 展开。
  */
 const CHILD_WINDOW = 3;
-/**
- * 轮播间隔（毫秒）：每隔这么久往后挪一个块。
- *
- * 相位由 `Date.now()` 算（纯函数）：**本模块不持有任何定时器**。
- * 推动它的是 pi 自己的帧（运行中 working spinner 每 80ms 重绘一次，子代理的
- * partial result 也会持续触发重绘），所以轮播是"搭车"而不是"自己踩油门"。
- *
- * 早期版本为此起过一个 2.5s 的定时器，结果 8 个任务时每隔 2.5s 就强制整屏
- * 重渲染一次，屏幕上会"闪一下"；去掉后不再有不必要的重画。
- */
-const CHILD_ROTATE_MS = 2500;
+/** 并行块里"执行内容"窗口的行数（一屏要放 3 块，所以比单个/链式矮）。 */
+const PARALLEL_TAIL_LINES = 2;
 
 /**
  * 选出当前要显示的块（纯函数，便于单测）。
  *
  * - 展开态 / 总数 ≤ 窗口：全部显示
- * - 运行中：从 `floor(now / CHILD_ROTATE_MS) % total` 开始取 3 块（可环绕）
- * - 运行结束：固定在**第一屏**（offset = 0），不再随渲染时间变化
+ * - 否则：**前 N 个**（不再随时间轮播）
  */
 export function windowedChildren<T>(
 	children: readonly T[],
 	expanded: boolean,
-	/** 只有运行中才轮播；结束后固定在窗口起点（不再动，避免读历史时被拽动）。 */
-	running: boolean,
-	now = Date.now(),
 ): { visible: T[]; hidden: number; indices: number[] } {
 	if (expanded || children.length <= CHILD_WINDOW) {
 		return {
@@ -148,15 +136,12 @@ export function windowedChildren<T>(
 			indices: children.map((_item, index) => index),
 		};
 	}
-	const offset = running ? Math.floor(now / CHILD_ROTATE_MS) % children.length : 0;
-	const visible: T[] = [];
-	const indices: number[] = [];
-	for (let i = 0; i < CHILD_WINDOW; i++) {
-		const index = (offset + i) % children.length;
-		indices.push(index);
-		visible.push(children[index]!);
-	}
-	return { visible, hidden: children.length - CHILD_WINDOW, indices };
+	const visible = children.slice(0, CHILD_WINDOW);
+	return {
+		visible,
+		hidden: children.length - CHILD_WINDOW,
+		indices: visible.map((_item, index) => index),
+	};
 }
 
 /**
@@ -181,29 +166,25 @@ export function chainWindowChildren<T extends { status: string }>(
 }
 
 /**
- * 渲染窗口内的块，并把每块补齐到同一高度。
+ * 渲染窗口内的块（带内容签名缓存）。
  *
- * 两个性能要点：
+ * 缓存只为"别每帧重渲全部块"：8 个任务时旧实现要把 8 块都渲染一遍（只为显示 3 个），
+ * 现在签名命中直接复用上次的行。签名覆盖宽度、展开态、状态、用量、消息条数与 model，
+ * 流式中只有正在跑的那个块会失效。
  *
- * 1. **块渲染结果按内容签名缓存**（存在 `state.blockCache`）。等高补齐需要知道
- *    "全部子代理里最高的块有多高"，所以要为每块拿到行数；如果不缓存，8 个任务
- *    就会在每一帧把 8 个块完整渲染一遍（只为显示 3 个）。签名覆盖宽度、展开态、
- *    状态、用量与消息条数，流式中只有正在跑的那个块会失效，其余全部命中。
- * 2. 补齐高度取**全部子代理里的最高块**（不是当前窗口内的）：后者随轮播相位变化，
- *    补了也还是会跳。
+ * **不再做等高补齐**：窗口固定（前 3 个）、每块高度在流式中基本恒定，补齐只剩副作用
+ * （把"最高的那一块"的高度套到别的块上，补出大片空白）。
  */
-function renderPaddedWindow(options: {
+function renderCachedBlocks(options: {
 	state: SubagentPanelState;
 	children: readonly SubagentChildLike[];
 	indices: readonly number[];
 	build: (child: SubagentChildLike, index: number) => string[];
-	/** 是否需要等高（轮播时才需要；一次性铺全部时不必） */
-	pad: boolean;
 	/** 缓存签名里要带上的额外状态（展开态等）。 */
 	extra: string;
 	width: number;
 }): string[] {
-	const { state, children, indices, build, pad, extra, width } = options;
+	const { state, children, indices, build, extra, width } = options;
 	state.blockCache ??= new Map<string, { signature: string; lines: string[] }>();
 
 	const renderOne = (index: number): string[] => {
@@ -216,8 +197,8 @@ function renderPaddedWindow(options: {
 			child.usage.output,
 			child.messages.length,
 			childActivityText(child.messages).length,
-			// model 也进签名：底行用 childModel()，若 pi 在消息之后才补写 details.model，
-			// 不带它就会命中旧缓存、底行永久缺模型名（防御性，代价 1 个字符串）。
+			// model 也进签名：底行用 childModel()，若 pi 之后才补写 details.model，
+			// 不带它就会命中旧缓存、底行永久缺模型名。
 			child.model ?? "",
 		].join("\u0000");
 		const cached = state.blockCache!.get(childKey(index));
@@ -227,20 +208,8 @@ function renderPaddedWindow(options: {
 		return lines;
 	};
 
-	if (!pad) {
-		const lines: string[] = [];
-		for (const index of indices) lines.push(...renderOne(index));
-		return lines;
-	}
-
-	const rendered = children.map((_child, index) => renderOne(index));
-	const maxHeight = rendered.reduce((max, lines) => Math.max(max, lines.length), 0);
 	const lines: string[] = [];
-	for (const index of indices) {
-		const blockLines = rendered[index] ?? [];
-		lines.push(...blockLines);
-		for (let i = blockLines.length; i < maxHeight; i++) lines.push("");
-	}
+	for (const index of indices) lines.push(...renderOne(index));
 	return lines;
 }
 
@@ -396,9 +365,8 @@ class MultiAgentView extends CachedView {
 		const sig = this.details.results
 			.map((child) => `${child.status}:${child.usage.input}:${child.usage.output}`)
 			.join(",");
-		// 轮播相位也进缓存键（仅运行中），否则窗口停在第一屏不动
-		const phase = this.running ? Math.floor(Date.now() / CHILD_ROTATE_MS) : 0;
-		return `${this.details.mode}:${sig}:${phase}:${this.running ? Math.floor(Date.now() / 50) : 0}`;
+		// 运行中带 50ms 帧号（扫光/耗时需要重画）；窗口已固定，不需要相位。
+		return `${this.details.mode}:${sig}:${this.running ? Math.floor(Date.now() / 50) : 0}`;
 	}
 
 	protected renderLines(width: number): string[] {
@@ -409,18 +377,15 @@ class MultiAgentView extends CachedView {
 		const selection =
 			this.details.mode === "chain"
 				? chainWindowChildren(this.details.results, false)
-				: windowedChildren(this.details.results, false, this.running);
+				: windowedChildren(this.details.results, false);
 		const { hidden, indices } = selection;
 		lines.push(
-			...renderPaddedWindow({
+			...renderCachedBlocks({
 				state: this.state,
 				children: this.details.results,
 				indices,
 				extra: `run:${this.running ? 1 : 0}`,
 				width,
-				// 链式只显示 1 块、不轮播：补齐没有意义（而且会把"最高的那一步"的高度
-				// 套到当前步上，补出一大片空白）。切换步骤时的高度变化是预期内的。
-				pad: hidden > 0 && this.details.mode !== "chain",
 				build: (child, index) =>
 					new AgentBlockView({
 						child,
@@ -431,6 +396,9 @@ class MultiAgentView extends CachedView {
 						showTitle: true,
 						nest: CHILD_NEST,
 						index,
+						// 并行块一屏要放 3 个，执行内容只留 2 行；单个/链式保持 4 行。
+						tailLines:
+							this.details.mode === "parallel" ? PARALLEL_TAIL_LINES : undefined,
 					}).render(width),
 			}),
 		);
@@ -440,7 +408,7 @@ class MultiAgentView extends CachedView {
 					"muted",
 					this.details.mode === "chain"
 						? `… 还有 ${hidden} 步（Ctrl+O 展开全部）`
-						: `… 还有 ${hidden} 个子代理（循环显示，Ctrl+O 展开全部）`,
+						: `… 还有 ${hidden} 个子代理（Ctrl+O 展开全部）`,
 				)}`,
 			);
 		}
@@ -528,16 +496,15 @@ class SubagentResultView extends CachedView {
 		const selection =
 			this.details.mode === "chain"
 				? chainWindowChildren(results, this.expanded)
-				: windowedChildren(results, this.expanded, false);
+				: windowedChildren(results, this.expanded);
 		const { hidden, indices } = selection;
 		lines.push(
-			...renderPaddedWindow({
+			...renderCachedBlocks({
 				state: this.state,
 				children: results,
 				indices,
 				extra: `done:${this.expanded ? 1 : 0}`,
 				width,
-				pad: hidden > 0 && this.details.mode !== "chain",
 				build: (child, index) =>
 					new AgentBlockView({
 						child,
