@@ -39,6 +39,7 @@ import {
 	BOLD_OFF,
 	BOLD_ON,
 	CachedView,
+	compactionLabel,
 	formatPanelDuration,
 	liveTitle,
 	formatTokens,
@@ -54,7 +55,8 @@ import {
 	unpatchPrototypeSlots,
 	WARN_YELLOW,
 } from "./core.ts";
-import type { BlockClock, Rgb, ThemeLike } from "./core.ts";
+import { setActiveCompactionReason } from "./core.ts";
+import type { BlockClock, CompactionReason, Rgb, ThemeLike } from "./core.ts";
 import { conclusionHead } from "./subagent-data.ts";
 
 /** 压缩块图标（Nerd Font U+F0CFF）。 */
@@ -109,6 +111,8 @@ interface SummaryMessageLike {
  */
 interface CompactionRecord {
 	elapsedMs: number;
+	/** 触发原因：手动 / 阈值自动 / 溢出恢复。 */
+	reason?: CompactionReason;
 	/** 压缩后的上下文估算（pi 同一套 estimateTokens）。 */
 	tokensAfter?: number;
 }
@@ -308,7 +312,7 @@ export function compactionTitle(
 	}
 	return summaryTitle({
 		icon: ICON_COMPACTION,
-		label: "压缩完成",
+		label: compactionLabel(record?.reason, "done"),
 		accent: COMPACTION_ACCENT,
 		meta,
 		elapsedMs: record?.elapsedMs,
@@ -411,16 +415,18 @@ export function textsFromPreparation(preparation: unknown): string {
 export class CompactionIndicatorView extends CachedView {
 	private readonly clock: BlockClock;
 	private readonly source: string;
+	private readonly reason: CompactionReason | undefined;
 
-	constructor(clock: BlockClock, source = "") {
+	constructor(clock: BlockClock, source = "", reason: CompactionReason | undefined = undefined) {
 		super();
 		this.clock = clock;
 		this.source = source;
+		this.reason = reason;
 	}
 
 	protected override cacheKey(): string {
 		// 扫光与耗时按 100ms 粒度变化；压缩期间 pi 的 spinner 会持续给帧。
-		return `${this.clock.startedAt ?? 0}:${Math.floor(Date.now() / 100)}:${this.source.length}`;
+		return `${this.clock.startedAt ?? 0}:${Math.floor(Date.now() / 100)}:${this.source.length}:${this.reason ?? ""}`;
 	}
 
 	protected renderLines(width: number): string[] {
@@ -428,7 +434,7 @@ export class CompactionIndicatorView extends CachedView {
 		// 标题（含行尾时钟与耗时）整行走同一个构建器：与输入框指示完全同色同动画。
 		const title = liveTitle(
 			ICON_COMPACTION,
-			"压缩中",
+			compactionLabel(this.reason, "running"),
 			COMPACTION_ACCENT,
 			this.clock.startedAt,
 			elapsedMs,
@@ -478,15 +484,21 @@ export class CompactionIndicatorView extends CachedView {
 export function setupCompactionIndicator(pi: ExtensionAPI): void {
 	const clock: BlockClock = {};
 	let source = "";
+	let reason: CompactionReason | undefined;
 
 	pi.on("session_before_compact", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		clock.startedAt = Date.now();
 		clock.endedAt = undefined;
+		reason = (event as { reason?: CompactionReason }).reason;
+		// 共享给 editor.ts 的 Loader 补丁（它拿不到结构化 reason）。
+		setActiveCompactionReason(reason);
 		source = textsFromPreparation((event as { preparation?: unknown }).preparation);
-		ctx.ui.setWidget(INDICATOR_WIDGET_KEY, () => new CompactionIndicatorView(clock, source), {
-			placement: "aboveEditor",
-		});
+		ctx.ui.setWidget(
+			INDICATOR_WIDGET_KEY,
+			() => new CompactionIndicatorView(clock, source, reason),
+			{ placement: "aboveEditor" },
+		);
 	});
 
 	const finish = (
@@ -515,11 +527,12 @@ export function setupCompactionIndicator(pi: ExtensionAPI): void {
 					// 拿不到就不显示"压缩后"，只显示压缩前。
 				}
 				recordCompactionResult(
-					{ elapsedMs: clock.endedAt - startedAt, tokensAfter },
+					{ elapsedMs: clock.endedAt - startedAt, tokensAfter, reason },
 					event.compactionEntry?.id,
 				);
 			}
 		}
+		setActiveCompactionReason(undefined);
 		ctx.ui.setWidget(INDICATOR_WIDGET_KEY, undefined);
 	};
 

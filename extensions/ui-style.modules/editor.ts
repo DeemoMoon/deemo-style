@@ -20,7 +20,9 @@ import {
 import {
 	BOLD_OFF,
 	BOLD_ON,
+	compactionLabel,
 	CORAL,
+	getActiveCompactionReason,
 	mixRgb,
 	RESET_FG,
 	sgr,
@@ -129,18 +131,25 @@ export const COMPACTION_TEXT = "压缩上下文中";
 /** 指示器标题色：与压缩/分支摘要块同一支紫色。 */
 const STATUS_ACCENT: Rgb = [177, 142, 250];
 
-/** kind → 文案（只处理这两种"元事件"指示器）。 */
-const STATUS_TEXT_BY_KIND: Record<string, string> = {
-	branchSummary: BRANCH_SUMMARY_TEXT,
-	compaction: COMPACTION_TEXT,
-};
+/**
+ * 指示器文案。
+ *
+ * - 分支摘要：固定 `摘要生成中`
+ * - 上下文压缩：按共享的 `reason` 区分「压缩上下文中 / 自动压缩中 / 溢出恢复中」
+ *   （Loader 补丁拿不到结构化 reason，只能读 summary-blocks 写入的共享状态）
+ */
+function statusTextFor(kind: string | undefined): string | undefined {
+	if (kind === "branchSummary") return BRANCH_SUMMARY_TEXT;
+	if (kind === "compaction") return compactionLabel(getActiveCompactionReason(), "running");
+	return undefined;
+}
 
 /** 打补丁：分支摘要 + 上下文压缩的指示器文案/动画统一成「工作中」那套。 */
 export function patchSummaryStatusIndicators(): void {
 	const proto = Loader.prototype as unknown as LoaderLike;
 	const originalUpdateDisplay = proto.updateDisplay;
 	const patched = function (this: LoaderLike): void {
-		const text = this.kind === undefined ? undefined : STATUS_TEXT_BY_KIND[this.kind];
+		const text = statusTextFor(this.kind);
 		if (text !== undefined) {
 			if (!this.__uiStylePatched) {
 				this.__uiStylePatched = true;

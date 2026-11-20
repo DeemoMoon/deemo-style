@@ -126,6 +126,32 @@ export function resetContextUsageCache(): void {
  * MIN_RENDER_INTERVAL_MS=16 不会帮你合并，ScrollView 也没有视口裁剪），
  * 所以别轻易调小：100ms = 10fps 已经够扫光/呼吸看着顺，200ms 会明显卡顿。
  */
+/**
+ * 压缩的触发原因（pi 的 `session_before_compact` / `session_compact` 都带 `reason`）。
+ *
+ * 三条路径共用同一套渲染，但文案要区分：手动 / 阈值自动 / 溢出恢复。
+ * 这个状态由 `summary-blocks.ts` 在事件里写、`editor.ts` 的指示器补丁读
+ * （Loader 补丁拿不到结构化 reason，只能读共享状态）。
+ */
+export type CompactionReason = "manual" | "threshold" | "overflow";
+
+let activeCompactionReason: CompactionReason | undefined;
+
+export function setActiveCompactionReason(reason: CompactionReason | undefined): void {
+	activeCompactionReason = reason;
+}
+
+export function getActiveCompactionReason(): CompactionReason | undefined {
+	return activeCompactionReason;
+}
+
+/** 压缩文案（进行中 / 完成）按原因区分；未提供原因按手动处理。 */
+export function compactionLabel(reason: CompactionReason | undefined, phase: "running" | "done"): string {
+	if (reason === "overflow") return phase === "running" ? "溢出恢复中" : "溢出恢复完成";
+	if (reason === "threshold") return phase === "running" ? "自动压缩中" : "自动压缩完成";
+	return phase === "running" ? "压缩上下文中" : "压缩完成";
+}
+
 export const ANIMATION_TICK_MS = 100;
 
 type TickListener = (now: number) => void;

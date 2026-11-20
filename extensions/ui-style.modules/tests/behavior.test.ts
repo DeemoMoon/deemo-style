@@ -3090,11 +3090,11 @@ test("压缩中指示：session_before_compact 起表、session_compact 收表",
 	assert.equal((handlers.get("session_before_compact")?.length ?? 0), before + 1);
 	assert.equal((handlers.get("session_compact")?.length ?? 0), after + 1);
 
-	// 视图本身：图标 + 「压缩中」+ 扫光
+	// 视图本身：图标 + 文案（默认按手动压缩）+ 扫光
 	const clock = { startedAt: Date.now() - 1200 };
 	const lines = new CompactionIndicatorView(clock).render(80).map(strip);
 	assert.ok(lines[0].includes(ICON_COMPACTION), `标题应有压缩图标：${lines[0]}`);
-	assert.match(lines[0], /压缩中/);
+	assert.match(lines[0], /压缩上下文中/);
 	assert.match(lines.join("\n"), /正在生成摘要/);
 
 	// 事件接线：起表挂 widget，收表清 widget
@@ -3182,7 +3182,7 @@ test("压缩中指示：5 行窗口按时间自动下滚（流式观感）", asy
 		// ① 起始：看头部 5 行 + 「下面还有 7 行」
 		const head = renderAt(0);
 		assert.ok(head[0].includes(ICON_COMPACTION), `标题应有压缩图标：${head[0]}`);
-		assert.match(head[0], /压缩中/);
+		assert.match(head[0], /压缩上下文中/);
 		const headBody = head.slice(1).join("\n");
 		assert.ok(headBody.includes("原文第 1 行"), `起始应从头显示：\n${headBody}`);
 		assert.equal((headBody.match(/原文第 \d+ 行/g) ?? []).length, SUMMARY_WINDOW_LINES, `窗口应固定 ${SUMMARY_WINDOW_LINES} 行`);
@@ -3330,5 +3330,75 @@ test("压缩块标题带时钟耗时（紫 + 扫光），输入框指示只有�
 		assert.doesNotMatch(strip(firstFrame), /\d+ms|\d+\.\ds/, "首帧不该有耗时");
 	} finally {
 		Date.now = realNow;
+	}
+});
+
+test("压缩文案按原因区分：手动 / 自动（阈值）/ 溢出恢复", async () => {
+	const { compactionLabel, setActiveCompactionReason } = await import("../core.ts");
+	const { CompactionIndicatorView } = await import("../summary-blocks.ts");
+	const { compactionTitle } = await import("../summary-blocks.ts");
+	const { patchSummaryStatusIndicators, unpatchSummaryStatusIndicators } = await import("../editor.ts");
+	const { Loader } = await import("@earendil-works/pi-tui");
+	const { strip } = { strip: (s) => s.replace(/\x1b\[[0-9;]*m/g, "") };
+
+	// ① 标签函数
+	assert.equal(compactionLabel(undefined, "running"), "压缩上下文中");
+	assert.equal(compactionLabel("manual", "running"), "压缩上下文中");
+	assert.equal(compactionLabel("threshold", "running"), "自动压缩中");
+	assert.equal(compactionLabel("overflow", "running"), "溢出恢复中");
+	assert.equal(compactionLabel(undefined, "done"), "压缩完成");
+	assert.equal(compactionLabel("threshold", "done"), "自动压缩完成");
+	assert.equal(compactionLabel("overflow", "done"), "溢出恢复完成");
+
+	// ② 块标题：记录里带 reason 就体现在标题上
+	const done = (reason) =>
+		strip(compactionTitle({ tokensBefore: 12345 }, { elapsedMs: 1800, tokensAfter: 4000, reason }));
+	assert.match(done("manual"), /压缩完成/);
+	assert.match(done("threshold"), /自动压缩完成/);
+	assert.match(done("overflow"), /溢出恢复完成/);
+	assert.match(done("threshold"), /12k → 4k tokens（-68%）/, "对比信息仍在");
+
+	// ③ 压缩中视图：不同 reason 的标题不同
+	for (const [reason, expect] of [
+		["manual", /压缩上下文中/],
+		["threshold", /自动压缩中/],
+		["overflow", /溢出恢复中/],
+	]) {
+		const text = strip(
+			new CompactionIndicatorView({ startedAt: Date.now() - 1200 }, "原文", reason)
+				.render(80)[0] ?? "",
+		);
+		assert.match(text, expect, `${reason} 的标题应是 ${expect}：${text}`);
+	}
+
+	// ④ 输入框指示：读共享 reason
+	const realNow = Date.now;
+	patchSummaryStatusIndicators();
+	const indicator = (reason) => {
+		setActiveCompactionReason(reason);
+		const loader = new Loader(undefined, (t) => t, (t) => t);
+		loader.kind = "compaction";
+		Date.now = () => 1_000_000;
+		loader.updateDisplay();
+		Date.now = () => 1_000_000 + 1840;
+		loader.updateDisplay();
+		const text = strip(loader.render(80)[1] ?? "");
+		loader.stop();
+		return text;
+	};
+	try {
+		for (const [reason, expect] of [
+			[undefined, /压缩上下文中/],
+			["threshold", /自动压缩中/],
+			["overflow", /溢出恢复中/],
+		]) {
+			assert.match(indicator(reason), expect, `${reason} 的输入框指示文案不对`);
+		}
+		// 手动（无 reason）默认仍是「压缩上下文中」
+		assert.ok(indicator(undefined).includes("压缩上下文中"));
+	} finally {
+		Date.now = realNow;
+		setActiveCompactionReason(undefined);
+		unpatchSummaryStatusIndicators();
 	}
 });
