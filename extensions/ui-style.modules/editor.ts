@@ -21,7 +21,6 @@ import {
 	BOLD_OFF,
 	BOLD_ON,
 	CORAL,
-	liveTitle,
 	mixRgb,
 	RESET_FG,
 	sgr,
@@ -152,8 +151,9 @@ export function patchSummaryStatusIndicators(): void {
 				this.restartAnimation?.();
 			}
 			const elapsed = Date.now() - (this.__uiStyleStart ?? Date.now());
-			// 与压缩块标题共用 liveTitle：同样的紫色 + 同样的扫光（耗时也进扫光带）。
-			this.message = liveTitle("", text, STATUS_ACCENT, this.__uiStyleStart, elapsed);
+			// 输入框里的指示**只保留月相 + 呼吸文案**（不带时钟/耗时）：这一行紧贴输入框，
+			// 数字跳动会干扰打字；耗时由压缩块标题负责展示。
+			this.message = workingMessage(elapsed, text);
 		}
 		originalUpdateDisplay.call(this);
 	};

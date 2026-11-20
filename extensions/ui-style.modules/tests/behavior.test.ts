@@ -3251,8 +3251,9 @@ test("摘要/压缩指示器：文案换成「摘要生成中」/「压缩上下
 		const compactionText = compaction.render(80).map(strip).join("\n");
 		assert.ok(compactionText.includes(COMPACTION_TEXT), `应显示「压缩上下文中」：\n${compactionText}`);
 		assert.ok(!compactionText.includes("Compacting context"), `不该再有 pi 的英文文案：\n${compactionText}`);
-		assert.ok(compactionText.includes(ICON_CLOCK), `压缩指示应有时钟图标：\n${compactionText}`);
-		assert.match(compactionText, /\d+\.\d+s|\d+ms/, `压缩指示应有耗时：\n${compactionText}`);
+		// 输入框里的指示只有月相 + 文案：不带时钟/耗时（耗时由压缩块标题负责）
+		assert.ok(!compactionText.includes(ICON_CLOCK), `压缩指示不应有时钟：\n${compactionText}`);
+		assert.doesNotMatch(compactionText, /\d+\.\d+s|\d+ms/, `压缩指示不应有耗时：\n${compactionText}`);
 
 		// ③ 都是月相 + 呼吸换色
 		for (const text of [branchText, compactionText]) {
@@ -3284,19 +3285,25 @@ test("摘要/压缩指示器：文案换成「摘要生成中」/「压缩上下
 	assert.ok(strip(workingMessage(0, COMPACTION_TEXT)).includes(COMPACTION_TEXT));
 });
 
-test("压缩的两处计时：同色（紫）同动画（整行扫光，耗时也在扫光带里）", async () => {
+test("压缩块标题带时钟耗时（紫 + 扫光），输入框指示只有月相 + 文案", async () => {
 	const { liveTitle } = await import("../core.ts");
-	const { CompactionIndicatorView } = await import("../summary-blocks.ts");
+	const { CompactionIndicatorView, ICON_COMPACTION } = await import("../summary-blocks.ts");
 	const { patchSummaryStatusIndicators, unpatchSummaryStatusIndicators } = await import("../editor.ts");
+	const { ICON_CLOCK } = await import("../core.ts");
 	const { Loader } = await import("@earendil-works/pi-tui");
-	const { ICON_COMPACTION } = await import("../summary-blocks.ts");
 
 	const realNow = Date.now;
-	// ① 压缩块标题与 ② 输入框指示：同样的构造方式 → 同样的颜色数与紫色
 	Date.now = () => 1_000_000 + 1840;
 	try {
+		// ① 压缩块：紫色 + 耗时 + 整行扫光（多色）
 		const blockLine = new CompactionIndicatorView({ startedAt: 1_000_000 }, "原文").render(72)[0] ?? "";
+		assert.ok(blockLine.includes("177;142;250"), `块标题应是紫色：${JSON.stringify(strip(blockLine))}`);
+		assert.ok(blockLine.includes(ICON_CLOCK), "块标题应有时钟图标");
+		assert.match(strip(blockLine), /1\.8s/, "块标题应显示耗时");
+		const blockColors = new Set([...blockLine.matchAll(/38;2;\d+;\d+;\d+/g)].map((m) => m[0]));
+		assert.ok(blockColors.size >= 3, `块标题应逐字符扫光，实际 ${blockColors.size} 种颜色`);
 
+		// ② 输入框指示：只有月相 + 呼吸文案，没有时钟/耗时
 		patchSummaryStatusIndicators();
 		const loader = new Loader(undefined, (t) => t, (t) => t);
 		loader.kind = "compaction";
@@ -3308,19 +3315,19 @@ test("压缩的两处计时：同色（紫）同动画（整行扫光，耗时�
 		loader.stop();
 		unpatchSummaryStatusIndicators();
 
-		// 两处都含紫色、都含耗时、都逐字符着色（扫光）
-		for (const line of [blockLine, indicatorLine]) {
-			assert.ok(line.includes("177;142;250"), `应使用紫色：${JSON.stringify(strip(line))}`);
-			assert.match(strip(line), /1\.8s/, `应显示同样的耗时：${JSON.stringify(strip(line))}`);
-			const colors = new Set([...line.matchAll(/38;2;\d+;\d+;\d+/g)].map((m) => m[0]));
-			assert.ok(colors.size >= 3, `耗时也在扫光带里（多种颜色），实际 ${colors.size}`);
-		}
-		// 时钟图标在两处都出现
-		assert.ok(blockLine.includes("\uE382") && indicatorLine.includes("\uE382"), "两处都应有钟表图标");
+		const indicatorText = strip(indicatorLine);
+		assert.match(indicatorText, /压缩上下文中/, `应有文案：${indicatorText}`);
+		assert.ok(!indicatorLine.includes(ICON_CLOCK), `输入框指示不该有时钟：${indicatorText}`);
+		assert.doesNotMatch(indicatorText, /\d+\.\d+s|\d+ms/, `输入框指示不该有耗时：${indicatorText}`);
+		// 仍然是逐字符呼吸
+		const indicatorColors = new Set(
+			[...indicatorLine.matchAll(/38;2;\d+;\d+;\d+/g)].map((m) => m[0]),
+		);
+		assert.ok(indicatorColors.size >= 2, `输入框指示应逐字符呼吸，实际 ${indicatorColors.size} 种颜色`);
 
-		// liveTitle 本身：首帧 <16ms 不拼耗时（避免闪 0ms）
+		// liveTitle 本身：首帧 <16ms 不拼耗时
 		const firstFrame = liveTitle(ICON_COMPACTION, "压缩中", [177, 142, 250], 0, 0);
-		assert.doesNotMatch(strip(firstFrame), /ms|s ·/, "首帧不该有耗时");
+		assert.doesNotMatch(strip(firstFrame), /\d+ms|\d+\.\ds/, "首帧不该有耗时");
 	} finally {
 		Date.now = realNow;
 	}
