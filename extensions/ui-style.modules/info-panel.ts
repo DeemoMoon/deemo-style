@@ -56,8 +56,9 @@ import {
 	fitToWidth,
 	formatCwd,
 	shortenPathLine,
-	formatDateTime,
+	formatDateOnly,
 	formatDuration,
+	formatTimeOnly,
 	formatTokens,
 	MUTED,
 	OK_GREEN,
@@ -227,7 +228,9 @@ export function collectSessionInfoView(
 /** 单元格 → 文本（标签补到 LABEL_WIDTH）。 */
 function cellText(cell: Cell): string {
 	const pad = " ".repeat(Math.max(2, LABEL_WIDTH - visibleWidth(cell.label)));
-	return `${MUTED}${cell.label}${RESET_FG}${pad}${cell.value}`;
+	// 空标签只留空白列：不输出一对无用的色码（"创建"的第二行用空标签对齐）。
+	const label = cell.label === "" ? "" : `${MUTED}${cell.label}${RESET_FG}`;
+	return `${label}${pad}${cell.value}`;
 }
 
 /** 多格并排：先按等宽分，最后一格吃掉余量。 */
@@ -427,23 +430,36 @@ export function buildSessionInfoRows(
 		),
 		"name",
 	);
-	rows.push({
-		text: cellsLine(
-			[
-				// 会话**创建时间**（绝对时刻）；拿不到时退回相对时长 wallMs。
-				{
-					label: "创建",
-					value: plain(
-						stats.createdAt > 0
-							? formatDateTime(stats.createdAt)
-							: formatDuration(stats.wallMs),
-					),
-				},
-				{ label: "分支", value: plain(`${view.entryCount} 条目`) },
-			],
-			inner,
-		),
-	});
+	// 会话**创建时间**（绝对时刻）：一行放不下（`2026年11月19日 10时00分00秒` 在
+	// 窄面板里会被截断），所以拆两行——日期一行、时刻一行。
+	// 拿不到创建时间时退回相对时长（wallMs），此时只占一行。
+	if (stats.createdAt > 0) {
+		rows.push({
+			text: cellsLine(
+				[{ label: "创建", value: plain(formatDateOnly(stats.createdAt)) }],
+				inner,
+			),
+		});
+		rows.push({
+			text: cellsLine(
+				[
+					{ label: "", value: plain(formatTimeOnly(stats.createdAt)) },
+					{ label: "分支", value: plain(`${view.entryCount} 条目`) },
+				],
+				inner,
+			),
+		});
+	} else {
+		rows.push({
+			text: cellsLine(
+				[
+					{ label: "创建", value: plain(formatDuration(stats.wallMs)) },
+					{ label: "分支", value: plain(`${view.entryCount} 条目`) },
+				],
+				inner,
+			),
+		});
+	}
 	rows.push({
 		text: cellsLine(
 			[

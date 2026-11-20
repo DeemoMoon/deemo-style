@@ -248,14 +248,30 @@ export function formatDuration(ms: number): string {
  * `formatDuration`）。时间无效时返回 `--`，不显示 `Invalid Date`。
  */
 export function formatDateTime(ms: number | undefined): string {
-	if (ms === undefined || !Number.isFinite(ms) || ms <= 0) return "--";
-	const date = new Date(ms);
-	if (Number.isNaN(date.getTime())) return "--";
+	return `${formatDateOnly(ms)} ${formatTimeOnly(ms)}`;
+}
+
+/** 只有日期：`2026年11月19日`（无效时间返回 `--`）。 */
+export function formatDateOnly(ms: number | undefined): string {
+	const date = validDate(ms);
+	if (date === undefined) return "--";
 	const pad = (value: number): string => String(value).padStart(2, "0");
-	return (
-		`${date.getFullYear()}年${pad(date.getMonth() + 1)}月${pad(date.getDate())}日 ` +
-		`${pad(date.getHours())}时${pad(date.getMinutes())}分${pad(date.getSeconds())}秒`
-	);
+	return `${date.getFullYear()}年${pad(date.getMonth() + 1)}月${pad(date.getDate())}日`;
+}
+
+/** 只有时刻：`10时00分00秒`（无效时间返回 `--`）。 */
+export function formatTimeOnly(ms: number | undefined): string {
+	const date = validDate(ms);
+	if (date === undefined) return "--";
+	const pad = (value: number): string => String(value).padStart(2, "0");
+	return `${pad(date.getHours())}时${pad(date.getMinutes())}分${pad(date.getSeconds())}秒`;
+}
+
+/** 有效时间 → Date；否则 undefined（统一在这里挡掉 0 / NaN / 畸形值）。 */
+function validDate(ms: number | undefined): Date | undefined {
+	if (ms === undefined || !Number.isFinite(ms) || ms <= 0) return undefined;
+	const date = new Date(ms);
+	return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
 /**

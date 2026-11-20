@@ -1051,3 +1051,22 @@ test("sessionCreatedAt / sessionAgeMs：时长按会话创建时间算，拿不�
 	assert.equal(both.wallMs, 10 * 60_000, "wallMs 仍是首条→最后一条");
 	assert.equal(both.sessionAgeMs, 90 * 60_000, "sessionAgeMs 是创建→现在");
 });
+
+test("formatDateOnly / formatTimeOnly：拆成日期与时刻两行，窄宽度也放得下", async () => {
+	const { formatDateTime, formatDateOnly, formatTimeOnly } = await import("../core.ts");
+
+	const ms = new Date(2026, 10, 19, 10, 0, 0).getTime();
+	assert.equal(formatDateOnly(ms), "2026年11月19日");
+	assert.equal(formatTimeOnly(ms), "10时00分00秒");
+	// 组合起来与 formatDateTime 一致
+	assert.equal(formatDateTime(ms), "2026年11月19日 10时00分00秒");
+	// 补零
+	const midnight = new Date(2026, 0, 5, 3, 7, 9).getTime();
+	assert.equal(formatDateOnly(midnight), "2026年01月05日");
+	assert.equal(formatTimeOnly(midnight), "03时07分09秒");
+	// 无效值一律 --
+	for (const bad of [undefined, 0, Number.NaN, -1]) {
+		assert.equal(formatDateOnly(bad), "--");
+		assert.equal(formatTimeOnly(bad), "--");
+	}
+});

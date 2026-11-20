@@ -3738,7 +3738,10 @@ test("信息面板：显示会话创建的具体日期时间（拿不到时退�
 		.map((row) => strip(row.text))
 		.join("\n");
 	assert.match(text, /创建/, `应显示「创建」标签：\n${text}`);
-	assert.match(text, /2026年11月19日 10时00分00秒/, `应显示完整日期时间：\n${text}`);
+	// 拆成两行：第一行日期、第二行时刻（窄面板放得下）
+	assert.match(text, /2026年11月19日/, `第一行应是日期：\n${text}`);
+	assert.match(text, /10时00分00秒/, `第二行应是时刻：\n${text}`);
+	assert.doesNotMatch(text, /2026年11月19日 10时00分00秒/, `日期与时刻应分两行：\n${text}`);
 	assert.doesNotMatch(text, /2 h 0 m 0 s/, `不该显示相对时长：\n${text}`);
 
 	// 拿不到创建时间（createdAt = 0）→ 退回相对时长 wallMs
