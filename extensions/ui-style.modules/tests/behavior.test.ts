@@ -2973,3 +2973,127 @@ test("subagent 面板：块渲染按签名缓存（同一帧数据不重复渲�
 		.render(100);
 	assert.notEqual(cache.get("child:0").lines, before, "内容变化后该块应重新渲染");
 });
+
+// ---------------------------------------------------------------------------
+// 压缩摘要 / 分支摘要块
+// ---------------------------------------------------------------------------
+
+test("摘要块：图标 / 标题 / 固定 5 行窗口 / 展开全文 / 无背景", async () => {
+	const {
+		patchSummaryBlocks,
+		unpatchSummaryBlocks,
+		ICON_COMPACTION,
+		ICON_BRANCH,
+		SUMMARY_WINDOW_LINES,
+	} = await import("../summary-blocks.ts");
+
+	patchSummaryBlocks();
+	try {
+		// ① 压缩摘要块（pi 的真实组件）
+		const summary = Array.from({ length: 9 }, (_, i) => `摘要第 ${i + 1} 行`).join("\n");
+		const compaction = new piMain.CompactionSummaryMessageComponent(
+			{ role: "compactionSummary", summary, tokensBefore: 12345, timestamp: Date.now() },
+			undefined,
+			1,
+			[],
+			"id-1",
+			Date.now(),
+		);
+		const lines = compaction.render(100).map(strip);
+		const text = lines.join("\n");
+
+		assert.ok(text.includes(ICON_COMPACTION), `应有压缩图标：\n${text}`);
+		assert.match(text, /压缩完成/, "标题应为「压缩完成」");
+		assert.match(text, /压缩前 12k tokens/, "应带压缩前 token 数（formatTokens 口径：12.3k → 12k）");
+		assert.match(text, /⎿/, "内容应使用 ⎿ 连接符");
+		// 折叠态：窗口 5 行 + 「还有 4 行」
+		assert.equal((text.match(/摘要第 \d+ 行/g) ?? []).length, SUMMARY_WINDOW_LINES, `折叠应只显示 ${SUMMARY_WINDOW_LINES} 行：\n${text}`);
+		assert.match(text, /还有 4 行/, "应提示还有 4 行");
+		// 不再有 pi 默认的 [compaction] 标签
+		assert.ok(!text.includes("[compaction]"), "不该再有默认标签");
+
+		// ② 展开态给全文
+		compaction.setExpanded(true);
+		const expanded = compaction.render(100).map(strip).join("\n");
+		for (const i of [1, 5, 9]) {
+			assert.ok(expanded.includes(`摘要第 ${i} 行`), `展开应含第 ${i} 行：\n${expanded}`);
+		}
+
+		// ③ 分支摘要块
+		const branch = new piMain.BranchSummaryMessageComponent(
+			{ role: "branchSummary", summary: "分支摘要内容", fromId: "a1b2c3d4e5f6", timestamp: Date.now() },
+			undefined,
+			1,
+			[],
+			"id-2",
+			Date.now(),
+		);
+		const branchText = branch.render(100).map(strip).join("\n");
+		assert.ok(branchText.includes(ICON_BRANCH), `应有分支图标：\n${branchText}`);
+		assert.match(branchText, /分支摘要/);
+		assert.match(branchText, /from a1b2c3d4/, "应带来源短 id");
+		assert.ok(!branchText.includes("[branch]"), "不该再有默认标签");
+	} finally {
+		unpatchSummaryBlocks();
+	}
+});
+
+test("摘要块：长行按宽度折行、窄终端不超宽", async () => {
+	const { patchSummaryBlocks, unpatchSummaryBlocks } = await import("../summary-blocks.ts");
+	patchSummaryBlocks();
+	try {
+		const longLine = "很长的摘要内容".repeat(30);
+		const compaction = new piMain.CompactionSummaryMessageComponent(
+			{ role: "compactionSummary", summary: longLine, tokensBefore: 1000, timestamp: Date.now() },
+			undefined,
+			1,
+			[],
+			"id-3",
+			Date.now(),
+		);
+		for (const width of [40, 80]) {
+			for (const expanded of [false, true]) {
+				compaction.setExpanded(expanded);
+				const lines = compaction.render(width).map(strip);
+				for (const line of lines) {
+					assert.ok(visibleWidth(line) <= width, `width=${width} 超宽：${visibleWidth(line)}`);
+				}
+				// 折叠态不许出现 …（说明没被截断）
+				if (!expanded) {
+					assert.ok(lines.join("").includes("很长的摘要内容"), "折叠态应保留摘要文字");
+				}
+			}
+		}
+	} finally {
+		unpatchSummaryBlocks();
+	}
+});
+
+test("压缩中指示：session_before_compact 起表、session_compact 收表", async () => {
+	const { setupCompactionIndicator, CompactionIndicatorView, ICON_COMPACTION } = await import(
+		"../summary-blocks.ts"
+	);
+	const before = handlers.get("session_before_compact")?.length ?? 0;
+	const after = handlers.get("session_compact")?.length ?? 0;
+	setupCompactionIndicator({
+		on(event, fn) {
+			handlers.set(event, [...(handlers.get(event) ?? []), fn]);
+		},
+	});
+	assert.equal((handlers.get("session_before_compact")?.length ?? 0), before + 1);
+	assert.equal((handlers.get("session_compact")?.length ?? 0), after + 1);
+
+	// 视图本身：图标 + 「压缩中」+ 扫光
+	const clock = { startedAt: Date.now() - 1200 };
+	const lines = new CompactionIndicatorView(clock).render(80).map(strip);
+	assert.ok(lines[0].includes(ICON_COMPACTION), `标题应有压缩图标：${lines[0]}`);
+	assert.match(lines[0], /压缩中/);
+	assert.match(lines.join("\n"), /正在生成摘要/);
+
+	// 事件接线：起表挂 widget，收表清 widget
+	const widgets = [];
+	const ctx = { mode: "tui", ui: { setWidget: (key) => widgets.push(key) } };
+	(handlers.get("session_before_compact") ?? []).at(-1)({ type: "session_before_compact" }, ctx);
+	(handlers.get("session_compact") ?? []).at(-1)({ type: "session_compact" }, ctx);
+	assert.equal(widgets.length, 2, "起表/收表各应操作一次 widget");
+});

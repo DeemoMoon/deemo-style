@@ -31,6 +31,8 @@ export const FEATURES = {
 	toolPanels: true,
 	/** subagent 工具面板（单个/并行/链式统一视觉）。 */
 	subagentPanel: true,
+	/** 压缩摘要 / 分支摘要块（统一视觉 + 压缩中指示）。 */
+	summaryBlocks: true,
 	/** 整轮结束后把视口带回回复开头（长回复 + 原来在跟随时）。 */
 	jumpToReplyStart: true,
 	/** 运行中块的标题扫光（图标 + 工具名 / 思考中 / `!` 短命令）。 */

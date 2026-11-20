@@ -14,6 +14,7 @@
 | `tail.ts` | `CachedView`（按宽度缓存 + 统一截宽）、`LiveTailView`（运行中的 tail -f 窗口）、`IndentedPreviewView` |
 | `panels.ts` | 工具面板（bash / codemode / read / write / edit / grep / find / ls / powershell）；收起态统一 3 行尾窗，展开态 ls 用圆角框 |
 | `subagent-data.ts` | 子代理面板的**数据层**：details 形状、图标常量、纯函数（状态标记 / 耗时 / 底行 / 标题 / display items / 结论折叠 / 过程摘要），可单测 |
+| `summary-blocks.ts` | **压缩摘要 / 分支摘要块**（原型补丁）：统一图标 + 标题 + `⎿` 固定 5 行窗口（折叠）/ 全文（展开）；另有压缩中指示（widget，「压缩中 + 扫光 + 耗时」） |
 | `subagent-block.ts` | **子代理块渲染**：`AgentBlockView`（块标题 → 黄色「任务」→ 滚动输出 / 结论头 4 行 → 过程摘要 → 底行）与行拼装助手；单个/并行/链式共用 |
 | `subagent-panel.ts` | **子代理面板外壳**：`HeaderView`（call 区标题+任务）、进度点与状态行、窗口选择（并行 3 块轮播 / 链式只看当前步）、等高补齐、块渲染缓存、渲染器注册 |
 | `edit-preview.ts` | edit 工具的**执行中 diff 预览**：参数归一、与 pi edit 同语义的精确/fuzzy 匹配、唯一命中/重叠检查、unified diff；独立成模块便于单测 |

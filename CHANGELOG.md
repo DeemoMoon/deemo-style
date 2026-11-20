@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.3.2] - 2026-11-19
+
+### 新功能：压缩摘要 / 分支摘要块统一视觉
+- 给 pi 的 `CompactionSummaryMessageComponent` / `BranchSummaryMessageComponent` 打原型补丁
+  （`summary-blocks.ts`），去掉默认的整块背景与 `[compaction]` / `[branch]` 标签：
+  - 压缩：`\uF0CFF 压缩完成 · 压缩前 12k tokens · ⏱ 1.8s`
+  - 分支：`\uF4CA 分支摘要 · from a1b2c3d4`
+  - 正文用 `⎿` 连接、**固定 5 行窗口**（看头部，超出提示 `还有 N 行（Ctrl+O 展开）`），
+    展开态给全文并按宽度折行；点击块同样可切换。
+- 压缩**进行中**补一个同款标题的指示（widget 挂在输入框上方，`压缩中` + 扫光 + 耗时），
+  由 `session_before_compact` / `session_compact` / `session_compact_failed` 驱动。
+  **限制**：pi 在压缩期间只显示 "Compacting context..." 的 spinner，既不暴露组件也不
+  暴露流式摘要文本（内部 `streamFn(...).result()` 一次拿完），所以"压缩中"只能给标题，
+  摘要正文要等完成态。
+
+### 测试
+- 125 → 127：摘要块的图标/标题/5 行窗口/展开全文/无默认标签/窄终端不超宽，
+  以及压缩中指示的事件接线。
+
 ## [1.3.1] - 2026-11-19
 
 ### 修复（复盘发现的边界 bug）

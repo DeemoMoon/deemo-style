@@ -53,6 +53,12 @@ import {
 } from "./assistant.ts";
 import { registerToolRenderers } from "./panels.ts";
 import { registerSubagentPanel } from "./subagent-panel.ts";
+import {
+	patchSummaryBlocks,
+	resetCompactionTiming,
+	setupCompactionIndicator,
+	unpatchSummaryBlocks,
+} from "./summary-blocks.ts";
 import { patchSkillBanner, unpatchSkillBanner } from "./skill-banner.ts";
 import { patchBashExec, unpatchBashExec } from "./bash-exec.ts";
 import {
@@ -105,6 +111,12 @@ export default function (pi: ExtensionAPI): void {
 
 	if (FEATURES.toolPanels) registerToolRenderers(pi);
 	if (FEATURES.subagentPanel) registerSubagentPanel(pi);
+	if (FEATURES.summaryBlocks) {
+		// 原型补丁（两个摘要块）+ 压缩中指示（事件驱动）；resetCompactionTiming 清掉
+		// 跨会话残留的耗时记录。
+		withPrototypePatch(pi, patchSummaryBlocks, unpatchSummaryBlocks, resetCompactionTiming);
+		setupCompactionIndicator(pi);
+	}
 	if (FEATURES.userMessage) {
 		withPrototypePatch(pi, patchUserMessagePad, unpatchUserMessagePad);
 	}
