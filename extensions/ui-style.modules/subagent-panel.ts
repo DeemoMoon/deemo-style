@@ -37,7 +37,13 @@
  *     链式：同上，任务行带 Step 编号
  */
 
-import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import {
+	truncateToWidth,
+	visibleWidth,
+	type Component,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+} from "@earendil-works/pi-tui";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	BAD_RED,
@@ -45,6 +51,7 @@ import {
 	BOLD_ON,
 	CachedView,
 	cleanText,
+	clockText,
 	formatTokens,
 	getTimerState,
 	OK_GREEN,
@@ -56,6 +63,7 @@ import {
 	WARN_YELLOW,
 } from "./core.ts";
 import { hitRateText } from "./context-bar.ts";
+import { captureOverlayUi, showChildResultOverlay } from "./subagent-result-overlay.ts";
 import type {
 	RenderResultOptionsLike,
 	Rgb,
@@ -86,6 +94,7 @@ import {
 	AgentBlockView,
 	BLANK_CONNECTOR,
 	CHILD_NEST,
+	childClock,
 	taskLines,
 } from "./subagent-block.ts";
 
@@ -388,6 +397,7 @@ class MultiAgentView extends CachedView {
 				? chainWindowChildren(this.details.results, false)
 				: windowedChildren(this.details.results, this.expanded);
 		const { hidden, indices } = selection;
+		const blockLines: string[] = [];
 		lines.push(
 			...renderCachedBlocks({
 				state: this.state,
@@ -436,6 +446,13 @@ class SubagentResultView extends CachedView {
 	/** 返回给主 agent 的结论（`result.content`，单个模式的权威来源）。 */
 	private readonly resultText: string;
 	private readonly expectedTotal: number | undefined;
+	/**
+	 * 上一次 render 时每个子代理块占的行区间（相对本组件的 y）。
+	 *
+	 * 用来把点击坐标映射到"点了哪个子代理"，然后弹只读结果窗。
+	 * render 每帧都会重算，所以 handleMouse 用到的永远是"屏幕上那一份"布局。
+	 */
+	private blockRanges: Array<{ index: number; start: number; end: number }> = [];
 
 	constructor(
 		details: SubagentDetailsLike,
@@ -492,6 +509,27 @@ class SubagentResultView extends CachedView {
 	}
 
 	/**
+	 * 点击某个子代理块 → 弹只读结果窗（只显示它返回给主 agent 的结论）。
+	 *
+	 * pi 的 `MouseRegion.handleMouse` 会先把事件转发给子组件，所以这里能抢在
+	 * pi 的"点击展开/收起"之前拿到点击；返回 `{ handled: true }` 就不再冒泡。
+	 * 滚轮不拦（`return undefined`），让 pi 正常滚动 transcript。
+	 */
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type === "wheel") return undefined;
+		if (event.type !== "press" && event.type !== "click") return undefined;
+		if (event.button !== "left") return undefined;
+		const hit = this.blockRanges.find(
+			(range) => event.y >= range.start && event.y < range.end,
+		);
+		if (hit === undefined) return undefined;
+		const child = this.details.results[hit.index];
+		if (child === undefined) return undefined;
+		void showChildResultOverlay(child, clockText(childClock(this.state, child, hit.index)));
+		return { handled: true };
+	}
+
+	/**
 	 * 并行 / 链式：状态行 + 每个子代理一块（与单个同款）+ Total。
 	 *
 	 * 每块自带标题（`\uF4BE 名称 · ⏱ 耗时 · ✓`），所以不再需要 `───` 分隔线
@@ -504,20 +542,23 @@ class SubagentResultView extends CachedView {
 		// 进度 + 用量合并成一行（替代以前的独立 Total 行）
 		const lines = [statusLine(results, this.details.mode, false, this.expectedTotal)];
 
-		// 窗口化 + 等高补齐（轮播时总高度恒定，避免整屏跳动）。
+		// 窗口化（固定前 3 个 / 展开全部）。
 		const selection =
 			this.details.mode === "chain"
 				? chainWindowChildren(results, this.expanded)
 				: windowedChildren(results, this.expanded);
 		const { hidden, indices } = selection;
-		lines.push(
-			...renderCachedBlocks({
+		// 先逐块渲染并记录行区间（供 handleMouse 判断"点了哪个子代理"）。
+		this.blockRanges = [];
+		let cursor = lines.length;
+		for (const index of indices) {
+			const blockLines = renderCachedBlocks({
 				state: this.state,
 				children: results,
-				indices,
+				indices: [index],
 				extra: `done:${this.expanded ? 1 : 0}`,
 				width,
-				build: (child, index) =>
+				build: (child, childIndex) =>
 					new AgentBlockView({
 						child,
 						state: this.state,
@@ -526,10 +567,13 @@ class SubagentResultView extends CachedView {
 						expanded: this.expanded,
 						showTitle: true,
 						nest: CHILD_NEST,
-						index,
+						index: childIndex,
 					}).render(width),
-			}),
-		);
+			});
+			lines.push(...blockLines);
+			this.blockRanges.push({ index, start: cursor, end: cursor + blockLines.length });
+			cursor += blockLines.length;
+		}
 		if (hidden > 0) {
 			lines.push(
 				`${UI_INDENT}${CHILD_NEST}${PREVIEW_CONNECTOR_REST}${theme.fg(
@@ -675,6 +719,8 @@ export function subagentPanel(): {
 
 /** 注册 subagent 面板渲染器（只有 subagent 命中，其余交还 pi）。 */
 export function registerSubagentPanel(pi: ExtensionAPI): void {
+	// 结果弹窗要用 ctx.ui.custom，而渲染器里拿不到 ctx —— 在事件里存一份引用。
+	captureOverlayUi(pi);
 	// 拿 TUI 引用（借 0 高度 widget），会话结束/重载时停掉轮播。
 	pi.registerToolRenderer((toolName, next) => {
 		if (toolName !== "subagent") return next();

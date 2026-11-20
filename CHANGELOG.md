@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.3.13] - 2026-11-19
+
+### 完成后点击子代理 → 弹出"只含结论"的只读窗口
+- 新增 `subagent-result-overlay.ts`：点击已结束的子代理块，弹出一个圆角只读窗口，
+  只显示**它返回给主 agent 的结论**（不含执行过程、工具调用、中间叙述）。
+  - 标题：`\uF4BE 名称 · ⏱ 耗时 · ✓`（状态标记沿用块标题那套颜色）
+  - 内容按宽度折行，`↑↓ / PgUp PgDn / j k / g G` 滚动、`Esc / q` 关闭；
+    行宽严格一致（边框闭环），高度稳定不随结论长短跳动。
+- 拦截方式：pi 的 `MouseRegion.handleMouse` 会**先把事件转发给子组件**，所以
+  `SubagentResultView` 实现 `handleMouse`，按上次 render 记录的行区间判断"点了哪个
+  子代理"，返回 `{ handled: true }` 阻止冒泡到 pi 的"点击展开"。滚轮不拦。
+- 结论取法：**最后一条 assistant 消息的最后一个 text 块**（弹窗用途是"只看结果"）。
+  注意它和 `childFinalOutput()` 不同——后者为对齐 pi 的 `getFinalOutput()` 取第一个
+  text（一条消息里"先说明 → 调工具 → 结论"时会拿到前言）。
+- `ctx.ui` 只能从事件里取，`captureOverlayUi()` 在 `session_start` 存引用；测试用
+  `setOverlayUiForTest()` 注入。
+
 ## [1.3.12] - 2026-11-19
 
 ### 运行中的并行块也能展开（Ctrl+O 与鼠标点击）

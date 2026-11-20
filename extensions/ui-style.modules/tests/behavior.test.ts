@@ -3442,3 +3442,82 @@ test("subagent 面板：运行中也能展开（Ctrl+O / 鼠标点击都走 setE
 	);
 	assert.doesNotMatch(expanded.join("\n"), /还有 \d+ 个子代理/, "展开后不该再有省略提示");
 });
+
+test("子代理结果弹窗：完成后点击某个块 → 弹窗只显示结论（无执行过程）", async () => {
+	const { registerSubagentPanel } = await import("../subagent-panel.ts");
+	const overlayMod = await import("../subagent-result-overlay.ts");
+
+	let resolver;
+	registerSubagentPanel({ registerToolRenderer: (fn) => (resolver = fn) });
+	const panel = resolver("subagent", () => undefined);
+
+	// 每个子代理的消息里既有"过程"（toolCall / 中间文本），也有"结论"
+	const mk = (agent, conclusion) =>
+		subagentChild({
+			agent,
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{ type: "text", text: "先跑一下命令" },
+						{ type: "toolCall", name: "bash" },
+						{ type: "text", text: conclusion },
+					],
+				},
+			],
+		});
+	const results = [mk("scout", "结论：theme.ts 有 302 行。"), mk("worker", "结论：text.ts 有 706 行。")];
+	const details = { content: [{ type: "text", text: "" }], details: subagentDetails("parallel", results) };
+
+	// 收集弹窗调用：注入一个假的 ui.custom
+	const opened = [];
+	overlayMod.setOverlayUiForTest({
+		custom: async (factory) => {
+			const done = () => {};
+			const theme = { fg: (_t, x) => x };
+			const tui = { terminal: { rows: 30 } };
+			opened.push(factory(tui, theme, {}, done));
+		},
+	});
+
+	const context = panelContext({ isPartial: false, expanded: false, state: {} });
+	const view = panel.renderResult(details, { expanded: false, isPartial: false }, theme, context);
+	const lines = view.render(100).map(strip);
+	view.render(100); // 让 blockRanges 稳定
+
+	// 找到第二个子代理标题所在行（y 坐标），点击它
+	const hitY = lines.findIndex((line) => /worker · /.test(line));
+	assert.ok(hitY >= 0, `找不到 worker 的块：\n${lines.join("\n")}`);
+
+	const result = view.handleMouse?.({ type: "click", button: "left", x: 4, y: hitY, width: 100, height: lines.length });
+	assert.deepEqual(result, { handled: true }, "点击子代理块应被拦截（不交给 pi 的展开逻辑）");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(opened.length, 1, "应弹出一个窗口");
+
+	const overlay = opened[0];
+	const overlayText = overlay.render(80).map(strip).join("\n");
+	// 只显示结论：不包含过程（工具调用 / 中间文本）
+	assert.ok(overlayText.includes("结论：text.ts 有 706 行。"), `弹窗应显示该子代理的结论：\n${overlayText}`);
+	assert.ok(!overlayText.includes("先跑一下命令"), `弹窗不该显示过程文本：\n${overlayText}`);
+	assert.doesNotMatch(overlayText, /→ bash/, "弹窗不该显示工具调用");
+	assert.ok(overlayText.includes("worker"), "弹窗标题应带子代理名");
+	// 边框闭环 + 宽度一致
+	const widths = new Set(overlay.render(80).map((line) => visibleWidth(line)));
+	assert.equal(widths.size, 1, `弹窗每行宽度应一致：${[...widths].join(",")}`);
+	assert.ok(overlayText.trimEnd().endsWith("╯"), "应有底边框");
+
+	// 滚轮不拦截（交给 pi 滚动 transcript）
+	assert.equal(
+		view.handleMouse?.({ type: "wheel", wheelDelta: -1, x: 4, y: hitY, width: 100, height: lines.length }),
+		undefined,
+		"滚轮不该被拦截",
+	);
+	// 点到块外面也不拦截
+	assert.equal(
+		view.handleMouse?.({ type: "click", button: "left", x: 4, y: 0, width: 100, height: lines.length }),
+		undefined,
+		"点状态行不该拦截",
+	);
+
+	overlayMod.setOverlayUiForTest(undefined);
+});
