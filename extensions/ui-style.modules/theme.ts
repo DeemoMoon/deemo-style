@@ -100,6 +100,26 @@ export function shimmerFrame(startedAt: number | undefined, now = Date.now()): n
 }
 
 /**
+ * 扫光用的 SGR 缓存：`base 色 + 量化后的混合比例 → 转义串`。
+ *
+ * 每帧每个字符都要一条 SGR；比例是连续值，但肉眼分辨不到 1/64 的差别，所以量化到
+ * 64 档做缓存。缓存上限很小（base 只有几种颜色 × 64 档），可以放心常驻进程。
+ */
+const SHIMMER_SGR_STEPS = 64;
+const shimmerSgrCache = new Map<string, string>();
+
+function shimmerSgr(base: Rgb, t: number): string {
+	const step = Math.round(Math.max(0, Math.min(1, t)) * SHIMMER_SGR_STEPS);
+	const key = `${base[0]},${base[1]},${base[2]}|${step}`;
+	const cached = shimmerSgrCache.get(key);
+	if (cached !== undefined) return cached;
+	const mixed = mixRgb(base, SHIMMER_HIGHLIGHT, step / SHIMMER_SGR_STEPS);
+	const value = sgr(mixed);
+	if (shimmerSgrCache.size < 512) shimmerSgrCache.set(key, value);
+	return value;
+}
+
+/**
  * 文本扫光：每个字符按到高亮带中心的距离从 base 混向白色，带中心左右往返。
  *
  * SGR 是零宽转义，因此 visibleWidth 与原文本一致，后面的 truncateToWidth 不受影响；
@@ -122,7 +142,7 @@ export function shimmerText(
 		const distance = Math.abs(index - center);
 		// 平滑衰减的高亮带：带中心最亮，带外回到原色。
 		const weight = distance >= SHIMMER_BAND ? 0 : (1 - distance / SHIMMER_BAND) ** 2;
-		out += `${sgr(mixRgb(base, SHIMMER_HIGHLIGHT, weight * SHIMMER_MIX))}${chars[index]}`;
+		out += `${shimmerSgr(base, weight * SHIMMER_MIX)}${chars[index]}`;
 	}
 	return `${out}${RESET_FG}`;
 }

@@ -64,6 +64,17 @@ export function hitRateMuted(rate: number | null | undefined): Rgb {
 	return LEVEL_MUTED[hitRateLevel(rate)];
 }
 
+/**
+ * 命中率文案（`41.5%`，带档位色）。没有缓存读写时返回 `--`。
+ *
+ * 子代理的块底行与并行状态行都用它，**别各写一套** `sgr(hitRateMuted(rate)) + toFixed`：
+ * 以前两处各写一份，改配色时漏掉一处就会同一屏出现两种绿。
+ */
+export function hitRateText(rate: number | undefined): string {
+	if (rate === undefined) return "--";
+	return `${sgr(hitRateMuted(rate))}${rate.toFixed(1)}%${RESET_FG}`;
+}
+
 /** 色条字形：▣ 实心 / □ 空心（全部单列宽，不用 emoji）。 */
 export type BarStyle = "box";
 

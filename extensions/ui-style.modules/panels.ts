@@ -381,13 +381,14 @@ const PANEL_SPECS: Record<string, PanelHeaderSpec> = {
  * 内容按预览行数折叠；出错时边框与文本转红。
  */
 class LsBoxView extends CachedView {
-	private readonly output: string;
+	/** 源行数组（**不** join 成字符串：目录大时每帧 join+split 是白跑一趟）。 */
+	private readonly sourceLines: readonly string[];
 	private readonly isError: boolean;
 	private readonly theme: ThemeLike;
 
-	constructor(output: string, isError: boolean, theme: ThemeLike) {
+	constructor(sourceLines: readonly string[], isError: boolean, theme: ThemeLike) {
 		super();
-		this.output = output;
+		this.sourceLines = sourceLines;
 		this.isError = isError;
 		this.theme = theme;
 	}
@@ -399,7 +400,7 @@ class LsBoxView extends CachedView {
 			// 窄到放不下边框：退化成一行纯文本。
 			// 注意不能直接按字符切 output——里面可能带换行，切出来会在行中嵌换行符，
 			// 后续 truncateToWidth 也收不住（pi 遇超宽行会报错停 TUI）。
-			const firstLine = (this.output.split("\n")[0] ?? "").trim();
+			const firstLine = [...this.sourceLines].find((line) => line.trim() !== "")?.trim() ?? "";
 			const label = firstLine || (this.isError ? "执行失败" : "(无输出)");
 			return [this.theme.fg(this.isError ? "error" : "text", label)];
 		}
@@ -409,7 +410,8 @@ class LsBoxView extends CachedView {
 		const contentLines: string[] = [];
 		const contentColor = this.isError ? "error" : "text";
 
-		if (!this.output) {
+		const hasContent = this.sourceLines.some((line) => line.trim() !== "");
+		if (!hasContent) {
 			const label = this.theme.fg(
 				this.isError ? "error" : "muted",
 				this.isError ? "执行失败" : "(无输出)",
@@ -419,7 +421,7 @@ class LsBoxView extends CachedView {
 			}
 		} else {
 			// 只有展开态会走到这里（收起态是 3 行尾窗），直接铺全部内容。
-			for (const line of this.output.split("\n")) {
+			for (const line of this.sourceLines) {
 				contentLines.push(
 					...wrapTextWithAnsi(this.theme.fg(contentColor, line), contentWidth),
 				);
@@ -482,7 +484,7 @@ const previewView: ResultView = (lines, expanded, isError, theme, extra) =>
 /** ls：展开时用圆角虚线框；收起时和其他工具一样用 3 行尾窗。 */
 // ls 只在展开态用圆角框（收起态一律走 3 行尾窗，见 panelResultBody）。
 const lsView: ResultView = (lines, _expanded, isError, theme) =>
-	new LsBoxView(lines.join("\n"), isError, theme);
+	new LsBoxView(lines, isError, theme);
 
 /**
  * 各面板共用的结果区：

@@ -139,10 +139,9 @@ export function resetCompactionTiming(): void {
 
 /** 取这个块对应的本地记录（优先按 entry id，其次用最近一次）。 */
 export function compactionRecord(entryId?: string): CompactionRecord | undefined {
-	if (entryId !== undefined) {
-		const hit = compactionByEntryId.get(entryId);
-		if (hit !== undefined) return hit;
-	}
+	// 有 id 就必须按 id 命中：**不能**回退到"最近一次压缩"——否则重放历史会话时，
+	// 老的 compaction 块会显示新一次压缩的耗时（与"历史回放显示 --，绝不编造"矛盾）。
+	if (entryId !== undefined) return compactionByEntryId.get(entryId);
 	return lastCompaction;
 }
 
@@ -320,6 +319,30 @@ export function compactionTitle(
 }
 
 /**
+ * 摘要的 token 数（带缓存）。
+ *
+ * 长摘要的 `estimateTokens` 是 O(文本长度)，而标题每次 "重建组件"都会算一遍；
+ * 用「长度 + 首尾各 32 字」当指纹缓存，内容变了自然失效。
+ * 注意：pi-ai 的 `estimateTokens` 对 assistant **只认 block 数组**的 content
+ * （传字符串会得到 0），这里显式包成 text 块。
+ */
+const summaryTokensCache = new Map<string, number>();
+
+export function summaryTokens(summary: string): number | undefined {
+	const text = summary.trim();
+	if (!text) return undefined;
+	const key = `${text.length}:${text.slice(0, 32)}:${text.slice(-32)}`;
+	const cached = summaryTokensCache.get(key);
+	if (cached !== undefined) return cached;
+	const value = estimateTokens({
+		role: "assistant",
+		content: [{ type: "text", text }],
+	} as never);
+	if (summaryTokensCache.size < 64) summaryTokensCache.set(key, value);
+	return value;
+}
+
+/**
  * 分支摘要块的标题：`\uF4CA 分支摘要 · from 3c9c3f06 · 摘要 1.2k tokens`。
  *
  * 分支摘要**不显示时钟**：它没有可信计时（既没有本地事件可测，条目里也没有耗时），
@@ -331,11 +354,7 @@ export function branchTitle(message: SummaryMessageLike): string {
 			? message.fromId.slice(0, 8)
 			: undefined;
 	const summary = typeof message.summary === "string" ? message.summary : "";
-	// 注意：pi-ai 的 estimateTokens 对 assistant 只认 **block 数组**的 content
-	// （传字符串会得到 0），所以这里显式包成 text 块。
-	const tokens = summary.trim()
-		? estimateTokens({ role: "assistant", content: [{ type: "text", text: summary }] } as never)
-		: undefined;
+	const tokens = summaryTokens(summary);
 	const parts: string[] = [];
 	if (from !== undefined) parts.push(`from ${from}`);
 	if (tokens !== undefined) parts.push(`摘要 ${formatTokens(tokens)} tokens`);
@@ -533,6 +552,8 @@ export function setupCompactionIndicator(pi: ExtensionAPI): void {
 			}
 		}
 		setActiveCompactionReason(undefined);
+		// 整段待压缩原文可能有几百 KB，压缩结束就释放，别常驻到下一次压缩。
+		source = "";
 		ctx.ui.setWidget(INDICATOR_WIDGET_KEY, undefined);
 	};
 

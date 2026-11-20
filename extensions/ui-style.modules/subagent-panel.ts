@@ -55,7 +55,7 @@ import {
 	UI_INDENT,
 	WARN_YELLOW,
 } from "./core.ts";
-import { hitRateMuted } from "./context-bar.ts";
+import { hitRateText } from "./context-bar.ts";
 import type {
 	RenderResultOptionsLike,
 	Rgb,
@@ -216,6 +216,9 @@ function renderPaddedWindow(options: {
 			child.usage.output,
 			child.messages.length,
 			childActivityText(child.messages).length,
+			// model 也进签名：底行用 childModel()，若 pi 在消息之后才补写 details.model，
+			// 不带它就会命中旧缓存、底行永久缺模型名（防御性，代价 1 个字符串）。
+			child.model ?? "",
 		].join("\u0000");
 		const cached = state.blockCache!.get(childKey(index));
 		if (cached !== undefined && cached.signature === signature) return cached.lines;
@@ -298,11 +301,8 @@ function statusLine(
 	} else {
 		const head = chain ? `${done}/${total} 步完成` : `${done}/${total} 完成`;
 		const usage = totalUsage(results);
-		const rate = cacheHitRate(usage);
-		// 命中率着色规则与各块底行完全一致（hitRateMuted：越高越好），
-		// 别在这里另写一套阈值，否则同一屏会出现两种"绿"。
-		const rateText =
-			rate === undefined ? "--" : `${sgr(hitRateMuted(rate))}${rate.toFixed(1)}%${RESET_FG}`;
+		// 命中率文案与各块底行共用 hitRateText（避免同一屏出现两种"绿"）。
+		const rateText = hitRateText(cacheHitRate(usage));
 		text =
 			`${dots} ${head}` +
 			(failed > 0 ? ` · ${failed} 失败` : "") +

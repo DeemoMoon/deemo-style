@@ -306,10 +306,23 @@ export function liveTitle(
 	startedAt: number | undefined,
 	elapsedMs: number,
 ): string {
-	const timer = elapsedMs < 16 ? "" : ` · ${ICON_CLOCK} ${formatPanelDuration(elapsedMs)}`;
+	// 首帧（<MIN_EXEC_CLOCK_MS）不拼耗时，与 liveClockText 同一阈值。
+	const timer =
+		elapsedMs < MIN_EXEC_CLOCK_MS ? "" : ` · ${ICON_CLOCK} ${formatPanelDuration(elapsedMs)}`;
 	const prefix = icon === "" ? "" : `${icon} `;
 	const plain = `${prefix}${label}${timer}`;
 	return `${BOLD_ON}${shimmerText(plain, accent, startedAt)}${BOLD_OFF}${RESET_FG}`;
+}
+
+/**
+ * 首帧阈值：块刚出现时（0~几 ms）不显示耗时，避免闪一下 "0ms"。
+ *
+ * 三个地方共用：`liveClockText`（子代理/面板）、`execClockText`（`!` 命令）、
+ * `liveTitle`（压缩/摘要指示）。**只对"还没结束"的块生效**——结束后的 3ms 是真实
+ * 耗时，应该显示。
+ */
+export function shouldHideEarlyMs(clock: BlockClock, ms: number): boolean {
+	return clock.endedAt === undefined && ms < MIN_EXEC_CLOCK_MS;
 }
 
 /**
@@ -322,7 +335,7 @@ export function liveTitle(
 export function liveClockText(clock: BlockClock, now = Date.now()): string | undefined {
 	const ms = clockElapsedMs(clock, now);
 	if (ms === undefined) return undefined;
-	if (clock.endedAt === undefined && ms < MIN_EXEC_CLOCK_MS) return undefined;
+	if (shouldHideEarlyMs(clock, ms)) return undefined;
 	return formatPanelDuration(ms);
 }
 

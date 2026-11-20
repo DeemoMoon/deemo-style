@@ -40,6 +40,11 @@ export interface ThinkingModelLike {
  * 模型支持的思考档位（与 pi-ai 的 `getSupportedThinkingLevels` 同一规则）：
  * 非推理模型只有 off；`thinkingLevelMap[level] === null` 表示不支持；
  * xhigh / max 必须显式映射才可用。
+ *
+ * ⚠ 这是**规则副本**：pi 没有从包里导出 `getSupportedThinkingLevels`（只导出
+ * `scopedModels` / `getAvailableModels` 之类的接口），所以只能自己实现。
+ * 对照版本：pi-coding-agent **1.5.2**（`dist/core/model-runtime.js` 的
+ * `getSupportedThinkingLevels`）。升级 pi 时如果"思考档位列表"行为变了，先看这里。
  */
 export function supportedThinkingLevels(model: ThinkingModelLike | undefined): string[] {
 	if (!model?.reasoning) return ["off"];

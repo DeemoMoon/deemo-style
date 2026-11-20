@@ -255,7 +255,7 @@ function matchesAny(regex: RegExp, candidates: readonly string[]): boolean {
  * 三段规则有先后顺序，不能合成一趟；但候选串只准备一次（旧实现每条
  * pattern、每一趟都要重算 5 个候选串）。
  */
-function isEnabledByPatterns(
+export function isEnabledByPatterns(
 	patterns: string[],
 	file: string,
 	baseDir: string,
@@ -267,9 +267,30 @@ function isEnabledByPatterns(
 	// `!pattern` 走 glob；`+path` / `-path` 是**精确路径**（pi 用 matchesAnyExactPattern）。
 	const matchedGlob = (pattern: string): boolean =>
 		matchesAny(wildcardRegExp(pattern.slice(1)), candidates);
+	// 与 pi 的 matchesAnyExactPattern 同语义：把 pattern 归一化后**直接比对**
+	// 相对路径 / basename / SKILL.md 的父目录相对路径，**不做 resolve**。
+	// 以前用 `resolve(baseDir, candidate)` 比较，会把 basename 当成"baseDir 下的
+	// 同名条目"，于是 `-commit` 会误伤任意目录里叫 commit 的 skill。
+	const normalizedPatternCache = new Map<string, string>();
+	const normalizedPattern = (raw: string): string => {
+		const cached = normalizedPatternCache.get(raw);
+		if (cached !== undefined) return cached;
+		const value = normalizeSlashes(raw).replace(/^\.\//, "").replace(/\/+$/, "");
+		normalizedPatternCache.set(raw, value);
+		return value;
+	};
 	const matchedExact = (pattern: string): boolean => {
-		const target = resolve(baseDir, pattern.slice(1));
-		return candidates.some((candidate) => resolve(baseDir, candidate) === target);
+		const target = normalizedPattern(pattern.slice(1));
+		const rel = normalizeSlashes(relative(baseDir, file));
+		if (target === rel || target === normalizeSlashes(file)) return true;
+		// SKILL.md 还允许用技能目录名匹配，且也接受绝对路径形式。
+		if (basename(file) === "SKILL.md") {
+			const parentRel = normalizeSlashes(relative(baseDir, dirname(file)));
+			if (target === parentRel || target === normalizeSlashes(dirname(file))) return true;
+		}
+		// 故意**不**比对 basename / 技能名：pi 的精确模式只认路径（rel / 绝对 / 技能目录），
+		// 用 basename 会把 `-commit` 误伤到任意目录下同名条目。
+		return false;
 	};
 
 	let enabled = true;
@@ -401,16 +422,20 @@ async function collectSkillFiles(cwd: string, settings: SettingsPair): Promise<s
 	roots.push(...resolveConfiguredPaths(settings.user.skills, agentDir()));
 	roots.push(...resolveConfiguredPaths(settings.project.skills, join(cwd, ".pi")));
 
-	const files: string[] = [];
-	for (const root of uniquePaths(roots)) {
-		const kind = await statKindAsync(root);
-		if (kind === "file") {
-			if (basename(root) === "SKILL.md") files.push(root);
-			continue;
-		}
-		if (kind === "dir") await collectSkillFilesIn(root, files);
-	}
-	return uniquePaths(files);
+	// 各 root 的 stat/递归互不依赖：并行跑（大 home / 多 root 时启动更快）。
+	const perRoot = await Promise.all(
+		uniquePaths(roots).map(async (root) => {
+			const found: string[] = [];
+			const kind = await statKindAsync(root);
+			if (kind === "file") {
+				if (basename(root) === "SKILL.md") found.push(root);
+			} else if (kind === "dir") {
+				await collectSkillFilesIn(root, found);
+			}
+			return found;
+		}),
+	);
+	return uniquePaths(perRoot.flat());
 }
 
 function unquote(value: string): string {
@@ -511,14 +536,24 @@ async function collectExtensions(
 
 	const files: string[] = [];
 	const knownKinds = new Map<string, PathKind>();
-	for (const root of uniquePaths(roots)) {
-		const kind = await statKindAsync(root);
-		if (kind === "dir") {
-			await collectExtensionFilesIn(root, files, knownKinds);
-		} else if (kind === "file") {
-			files.push(root);
-			knownKinds.set(root, "file");
-		}
+	// 各 root 并行扫（同上：root 之间没有共享状态，只有各自的局部数组）。
+	const perRoot = await Promise.all(
+		uniquePaths(roots).map(async (root) => {
+			const found: string[] = [];
+			const kinds = new Map<string, PathKind>();
+			const kind = await statKindAsync(root);
+			if (kind === "dir") {
+				await collectExtensionFilesIn(root, found, kinds);
+			} else if (kind === "file") {
+				found.push(root);
+				kinds.set(root, "file");
+			}
+			return { found, kinds };
+		}),
+	);
+	for (const { found, kinds } of perRoot) {
+		files.push(...found);
+		for (const [file, kind] of kinds) knownKinds.set(file, kind);
 	}
 
 	const unique = uniquePaths(files);

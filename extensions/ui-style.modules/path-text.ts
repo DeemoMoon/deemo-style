@@ -82,11 +82,19 @@ export function shortenPathLine(path: string, budget: number, ellipsis = "…"):
 	if (visibleWidth(path) <= budget) return path;
 
 	const segments = path.split("/").filter(Boolean);
-	// 从多保留到少保留，找到第一个塞得下的
-	for (let keep = segments.length - 1; keep >= 1; keep--) {
-		const candidate = `${ellipsis}/${segments.slice(-keep).join("/")}`;
-		if (visibleWidth(candidate) <= budget) return candidate;
+	// 从右往左**一次**累加（保留末尾若干段），随时用 1 + 累计宽度 判断放不放得下，
+	// 不再每轮 `slice(-keep).join("/") + visibleWidth`（长路径下是 O(n²)）。
+	const budgetForSegments = budget - visibleWidth(ellipsis) - 1; // 减掉 "…/" 本身
+	let used = 0;
+	let kept = 0;
+	for (let i = segments.length - 1; i >= 0; i--) {
+		const segment = segments[i] ?? "";
+		const width = visibleWidth(segment) + (kept > 0 ? 1 : 0); // 段间 "/"
+		if (used + width > budgetForSegments) break;
+		used += width;
+		kept += 1;
 	}
+	if (kept > 0) return `${ellipsis}/${segments.slice(-kept).join("/")}`;
 	return truncateToWidth(path, budget, ellipsis);
 }
 

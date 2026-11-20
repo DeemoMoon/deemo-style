@@ -144,6 +144,16 @@ class StatusLineFooter implements Component {
 	private contextUsage: ContextUsageLike = undefined;
 	private sessionName = "";
 
+	/**
+	 * cwd 的显示文本缓存（`formatCwd` + `shortenPathLine`）。
+	 *
+	 * 这两个函数每帧都要用，但 cwd 在一次会话里基本不变（`/cd` 才会变），
+	 * 所以在 refresh() 里算一次，render 只读缓存。
+	 */
+	private cwdText: { raw: string; short: string; line: string } = { raw: "", short: "", line: "" };
+	/** 上次计算目录行时的内宽（宽度变了才重算）。 */
+	private cwdLineWidth = -1;
+
 	/** git 状态缓存（undefined = 还没拿到）。 */
 	private gitStatusValue: GitStatus | null | undefined;
 	private gitStatusCwd: string | undefined;
@@ -178,6 +188,10 @@ class StatusLineFooter implements Component {
 
 		this.contextUsage = contextUsageCached(this.ctx);
 		this.sessionName = manager.getSessionName() ?? "";
+		const cwd = manager.getCwd();
+		if (cwd !== this.cwdText.raw) {
+			this.cwdText = { raw: cwd, short: formatCwd(cwd), line: "" };
+		}
 
 		if (render) this.tui.requestRender();
 	}
@@ -295,7 +309,7 @@ class StatusLineFooter implements Component {
 		const percentText = known ? `${percent.toFixed(1)}%` : "?";
 
 		// ---- 第二行：会话名 • [git 分支与状态 •] Ctx 文案 + ▣ 色条 ----
-		const rawCwd = SHOW_CWD_LINE ? this.ctx.sessionManager.getCwd() : "";
+		const rawCwd = SHOW_CWD_LINE ? this.cwdText.raw : "";
 		const line2Parts: string[] = [];
 
 		if (SHOW_CWD_LINE) {
@@ -338,7 +352,14 @@ class StatusLineFooter implements Component {
 		const lines = [left, line2];
 
 		// ---- 第三行：当前工作目录独占一行 ----
-		if (SHOW_CWD_LINE) lines.push(shortenPathLine(formatCwd(rawCwd), innerWidth));
+		if (SHOW_CWD_LINE) {
+			// 目录行按宽度截断，宽度变了才重算；cwd 本身取自 refresh() 的缓存。
+			if (this.cwdText.line === "" || this.cwdLineWidth !== innerWidth) {
+				this.cwdText.line = shortenPathLine(this.cwdText.short, innerWidth);
+				this.cwdLineWidth = innerWidth;
+			}
+			lines.push(this.cwdText.line);
+		}
 
 		// ---- 其他扩展通过 ctx.ui.setStatus() 设置的状态 ----
 		const statuses = this.footerData.getExtensionStatuses();

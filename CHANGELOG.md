@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.3.10] - 2026-11-19
+
+### 复盘（第二轮）修复
+- **`thinkingTimings` 淘汰死循环**：Map 里全是"正在计时"的记录时一条也删不掉、越过 500
+  上限后无限增长（每条还拖着 `ThinkingPreviewView`）。现在找不到可淘汰的就兜底删最早一条。
+- **`compactionRecord` 回退**：id 未命中时不再回退"最近一次压缩"，否则重放历史会话会让
+  老块显示新一次的耗时（与"历史显示 `--`，绝不编造"矛盾）。
+- **压缩原文未释放**：`finish()` 里清空 `source`（长会话可达数百 KB）。
+- **精确模式匹配语义**：`+path` / `-path` 改为按 pi 的 `matchesAnyExactPattern` 语义比对
+  相对路径 / 绝对路径 / SKILL.md 的父目录，**不再按 basename/技能名比对**——
+  以前 `-commit` 会误伤任意目录下同名技能。
+- **块缓存签名补 `model`**：pi 若在消息之后补写 `details.model`，底行不会永久缺模型名。
+- **会话统计周期兜底**：增量续算只校验最后一个 entry，挡不住历史条目被就地改写；
+  每 20 次调用做一次全量重算。
+- `levels.supportedThinkingLevels` 加版本锚点注释（pi 未导出该规则，1.5.2 对照）。
+
+### 性能
+- `shimmerText` 的 SGR 按「色 + 量化比例(64 档)」缓存（实测 2000 次调用 ~6ms）。
+- `branchTitle` 的 `estimateTokens` 按内容指纹缓存。
+- `LsBoxView` 直接收源行数组，去掉每帧 `join("\n")` → `split("\n")` 往返。
+- `ThinkingPreviewView` 的 `slice/map/join` 按 150ms 刷新槽缓存。
+- `shortenPathLine` 改为从右向左**单次**累加宽度（原来每轮 slice+join 是 O(n²)）。
+- `statusline` 的 `formatCwd` / 目录行按 cwd 与宽度缓存（原来每帧重算）。
+- `startup` 的技能/扩展 root 扫描改为并行。
+- 抽出 `shouldHideEarlyMs()`，三处「首帧 <16ms 不显示」共用。
+- 命中率文案统一为 `hitRateText()`（原来块底行与状态行各写一份）。
+
 ## [1.3.9] - 2026-11-19
 
 ### 压缩文案按触发原因区分（手动 / 阈值自动 / 溢出恢复）

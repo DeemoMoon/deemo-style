@@ -893,3 +893,86 @@ test("createSessionStatsComputer：只累加新增条目，结果与全量重算
 	a.totalTokens = 0;
 	assert.deepEqual(incremental(entries, now), computeSessionStats(entries, now), "缓存不应被上一次的返回值污染");
 });
+
+test("isEnabledByPatterns：精确模式按路径匹配，不按 basename（-commit 不误伤嵌套同名技能）", async () => {
+	const { isEnabledByPatterns } = await import("../startup.ts");
+	const base = "/base/skills";
+	const flat = `${base}/commit/SKILL.md`;
+	const nested = `${base}/nested/commit/SKILL.md`;
+
+	// `-path` 是精确路径：`-commit` 只匹配 base 下的 commit 技能目录
+	assert.equal(isEnabledByPatterns(["-commit"], flat, base, "commit", ["commit"]), false);
+	assert.equal(isEnabledByPatterns(["-commit"], nested, base, "commit", ["commit"]), true);
+
+	// `+path` 同理：嵌套目录要用相对路径
+	assert.equal(isEnabledByPatterns(["+nested/commit"], nested, base, "commit", ["commit"]), true);
+	assert.equal(isEnabledByPatterns(["+nested/commit"], flat, base, "commit", ["commit"]), true);
+	assert.equal(isEnabledByPatterns(["+commit"], flat, base, "commit", ["commit"]), true);
+
+	// `!glob` 仍然按 glob 匹配（大小写不敏感、支持 **）
+	assert.equal(isEnabledByPatterns(["!**/commit/**"], nested, base, "commit", ["commit"]), false);
+	assert.equal(isEnabledByPatterns(["!**/other/**"], nested, base, "commit", ["commit"]), true);
+
+	// 没有规则时默认启用
+	assert.equal(isEnabledByPatterns([], nested, base, "commit", ["commit"]), true);
+});
+
+test("createSessionStatsComputer：历史条目被就地改写后，周期性全量重算能纠正", async () => {
+	const { createSessionStatsComputer, computeSessionStats } = await import("../session-stats.ts");
+
+	const mk = (ts, input, output) => ({
+		type: "message",
+		timestamp: ts,
+		message: { role: "assistant", usage: { input, output, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } } },
+	});
+	const entries = [
+		mk("2026-11-15T10:00:00.000Z", 100, 10),
+		mk("2026-11-15T10:00:10.000Z", 200, 20),
+	];
+	const compute = createSessionStatsComputer();
+	const first = compute(entries);
+	assert.equal(first.totalTokens, 330);
+
+	// 就地改写历史条目的 usage（模拟 compaction / 会话编辑）
+	entries[0].message.usage.input = 1000;
+	// 紧接一次前缀续算仍会按旧值（这是已知取舍：不做 O(n) 校验）
+	const second = compute(entries);
+	assert.equal(second.totalTokens, 330, "续算会跳过已累加的历史条目（先按旧值）");
+
+	// 连续调用若干次后会触发全量重算，把改写纠正回来
+	let last = second;
+	for (let i = 0; i < 25; i++) last = compute(entries);
+	assert.deepEqual(last, computeSessionStats(entries), "周期性全量重算后应与全量结果一致");
+	assert.equal(last.totalTokens, 1230);
+});
+
+test("本轮性能/正确性修复的纯函数回归", async () => {
+	const { shouldHideEarlyMs, formatPanelDuration } = await import("../core.ts");
+	const { summaryTokens } = await import("../summary-blocks.ts");
+	const { shortenPathLine } = await import("../path-text.ts");
+
+	// ① 首帧阈值：未结束且 <16ms → 隐藏；已结束 → 显示真实毫秒
+	assert.equal(shouldHideEarlyMs({ startedAt: Date.now() }, 0), true);
+	assert.equal(shouldHideEarlyMs({ startedAt: Date.now() }, 15), true);
+	assert.equal(shouldHideEarlyMs({ startedAt: Date.now() }, 16), false);
+	assert.equal(shouldHideEarlyMs({ startedAt: Date.now(), endedAt: Date.now() }, 3), false);
+
+	// ② 摘要 token 缓存：同一内容两次调用结果一致；内容变了会重算
+	const a = summaryTokens("这是一段摘要内容");
+	const b = summaryTokens("这是一段摘要内容");
+	assert.equal(a, b);
+	assert.ok((a ?? 0) > 0, "摘要 token 不该是 0（assistant 必须传 block 数组）");
+	assert.notEqual(summaryTokens("完全不同的另一段更长一些的摘要内容"), a);
+	assert.equal(summaryTokens("   "), undefined);
+
+	// ③ shortenPathLine：从右侧保留末尾若干段，且不超预算
+	const path = "/very/long/path/to/some/project/src/components/deep/file.ts";
+	for (const budget of [10, 20, 30, 40, 60]) {
+		const out = shortenPathLine(path, budget);
+		assert.ok(visibleWidth(out) <= budget, `budget=${budget} 超宽：${out}`);
+	}
+	// 放得下时原样返回
+	assert.equal(shortenPathLine("/a/b.ts", 40), "/a/b.ts");
+	// 放不下时保住文件名
+	assert.ok(shortenPathLine(path, 20).endsWith("file.ts"), shortenPathLine(path, 20));
+});

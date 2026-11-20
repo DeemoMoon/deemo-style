@@ -27,7 +27,7 @@ import {
 } from "./core.ts";
 import type { BlockClock, Rgb } from "./core.ts";
 // 命中率档位色：越高越好（别和 context-bar 的 levelOf 混用，那个是"越高越糟"）。
-import { hitRateMuted } from "./context-bar.ts";
+import { hitRateText } from "./context-bar.ts";
 
 // ---- 图标与常量 -------------------------------------------------------------
 
@@ -238,10 +238,7 @@ export function childFooterText(child: SubagentChildLike): string {
 	// 思考强度与缓存命中率**不带图标**（只留文字值），避免小图标在状态行里抢视线。
 	const thinking = childThinkingLevel(child.messages);
 	if (thinking) parts.push(thinking);
-	const rate = cacheHitRate(usage);
-	parts.push(
-		rate === undefined ? "--" : `${sgr(hitRateMuted(rate))}${rate.toFixed(1)}%${RESET_FG}`,
-	);
+	parts.push(hitRateText(cacheHitRate(usage)));
 	return parts.join(" · ");
 }
 

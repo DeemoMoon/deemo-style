@@ -212,9 +212,18 @@ export function createSessionStatsComputer(): (
 	let lastEntry: StatEntryLike | undefined;
 	let base = emptyStats();
 	let tracker: TurnTracker = { first: 0, last: 0, turnStart: 0, turnEnd: 0 };
+	/** 距上次全量重算调用了几次（防止就地改写历史 entry 后一直按旧值累加）。 */
+	let sinceFullRecompute = 0;
+	/** 全量重算间隔（调用次数）。 */
+	const FULL_RECOMPUTE_EVERY = 20;
 
 	return (entries: readonly StatEntryLike[], now: number = Date.now()): SessionStats => {
+		sinceFullRecompute += 1;
+		// 前缀续算只校验"最后一个已算条目还是同一个对象"，挡不住"历史条目被就地改写"
+		// （compaction/会话编辑会改 timestamp）。周期性全量重算兜底，成本摊薄后无感。
+		const forceFull = sinceFullRecompute >= FULL_RECOMPUTE_EVERY;
 		const canExtend =
+			!forceFull &&
 			computedLength > 0 &&
 			entries.length >= computedLength &&
 			entries[computedLength - 1] === lastEntry;
@@ -222,6 +231,7 @@ export function createSessionStatsComputer(): (
 			base = emptyStats();
 			tracker = { first: 0, last: 0, turnStart: 0, turnEnd: 0 };
 			computedLength = 0;
+			sinceFullRecompute = 0;
 		}
 		for (let i = computedLength; i < entries.length; i++) {
 			const entry = entries[i]!;

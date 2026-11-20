@@ -456,11 +456,19 @@ function updateThinkingTiming(key: string, active: boolean, now: number): Thinki
 		record = {};
 		thinkingTimings.set(key, record);
 		if (thinkingTimings.size > MAX_THINKING_TIMINGS) {
-			// 只淘汰已经结束的片段：删掉正在计时的会把它从 0 重新计时。
+			// 优先淘汰已经结束的片段：删掉正在计时的会把它从 0 重新计时。
+			let evicted = false;
 			for (const [oldKey, oldRecord] of thinkingTimings) {
 				if (oldRecord.endedAt === undefined && !oldRecord.unknown) continue;
 				thinkingTimings.delete(oldKey);
+				evicted = true;
 				break;
+			}
+			// 全是"正在计时"的记录时（agent 中断会留下这种常驻记录），必须兜底删最早
+			// 一条（Map 是插入序），否则 Map 会无限增长、而且每条都拖着 ThinkingPreviewView。
+			if (!evicted) {
+				const oldest = thinkingTimings.keys().next();
+				if (!oldest.done) thinkingTimings.delete(oldest.value);
 			}
 		}
 	}
@@ -512,6 +520,27 @@ class ThinkingPreviewView extends CachedView {
 	/** 窗口内容快照（按 THINKING_REFRESH_MS 节拍更新）。 */
 	private bodySlot = -1;
 	private bodyText = "";
+	/**
+	 * 上一拍拼好的整段文本。
+	 *
+	 * 思考链要"取最后两段 + 各截尾部 + 用空行拼起来"，原来**每帧**都做一遍
+	 * （`slice/map/join`，随后 `tailWindow` 又拆回行）。按刷新槽缓存后每 150ms
+	 * 才拼一次，与快照节拍一致。
+	 */
+	private joinedSlot = -1;
+	private joinedText = "";
+	private joinedKey = "";
+
+	/** 这一拍要显示的整段文本（按节拍缓存拼接结果）。 */
+	private joinedFor(parts: readonly string[]): string {
+		const key = `${parts.length}:${parts[0]?.length ?? 0}:${parts[1]?.length ?? 0}`;
+		const slot = Math.floor(Date.now() / THINKING_REFRESH_MS);
+		if (slot === this.joinedSlot && key === this.joinedKey) return this.joinedText;
+		this.joinedSlot = slot;
+		this.joinedKey = key;
+		this.joinedText = parts.join("\n\n");
+		return this.joinedText;
+	}
 
 	/** 取"这一拍"的文本快照（完成后立即对齐最新内容）。 */
 	private snapshot(text: string, finished: boolean): string {
@@ -582,7 +611,7 @@ class ThinkingPreviewView extends CachedView {
 			.map((text) => tailSlice(text, THINKING_TAIL_CHARS));
 		// 按**可视行**取窗口：思考链常常是一整段没有换行，按源行取窗口会被折成
 		// 几十行 → 高度一直变（那就是抖动）。内容按节拍取快照（见 snapshot()）。
-		const joined = this.snapshot(parts.join("\n\n"), finished);
+		const joined = this.snapshot(this.joinedFor(parts), finished);
 		const { rows, more } = tailWindow(joined, THINKING_TAIL_LINES, contentWidth);
 		if (rows.length === 0 && !more) return lines;
 
