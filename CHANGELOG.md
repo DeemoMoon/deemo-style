@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.5] - 2026-11-19
+
+### 压缩指示器也换成「压缩上下文中」（同款月相 + 呼吸）
+- 上一版只处理了 `/tree` 的分支摘要指示器；压缩时 pi 的 `CompactionStatusIndicator`
+  仍是英文 `Compacting context... (esc to cancel)`。现在两者共用同一套补丁
+  （`patchSummaryStatusIndicators`）：
+  - `kind === "branchSummary"` → `🌕 摘要生成中`
+  - `kind === "compaction"` → `🌕 压缩上下文中`
+- 这两个指示器**不显示时钟/耗时**（动画只有月相 + 呼吸文字）；耗时只出现在
+  压缩完成后的摘要块里。
+- 其它 Loader（普通加载、重试倒计时）不受影响。
+
 ## [1.3.4] - 2026-11-19
 
 ### `/tree` 分支摘要指示器：换成「摘要生成中」+ 工作中同款动画

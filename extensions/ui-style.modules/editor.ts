@@ -98,13 +98,16 @@ export function workingMessage(elapsedMs: number, text = WORKING_TEXT): string {
 }
 
 /**
- * pi 在 `/tree` 生成分支摘要时会挂一个 `BranchSummaryStatusIndicator`，文案固定为
- * "Summarizing branch... (esc to cancel)"（类没导出，改不到实例）。
+ * pi 的两个"元事件"指示器（分支摘要 / 上下文压缩）文案都是英文硬编码：
+ *   - `BranchSummaryStatusIndicator`：`Summarizing branch... (esc to cancel)`
+ *   - `CompactionStatusIndicator`：`Compacting context... (esc to cancel)`
+ * 两个类都**没有从包里导出**，改不到实例。
  *
- * 这里改在它的基类 `Loader.prototype.updateDisplay` 上：只对
- * `kind === "branchSummary"` 的实例生效——把文案换成我们工作中那套**呼吸文字**
- * （"摘要生成中"），帧也换成月相、节拍换成 `WORKING_INTERVAL_MS`，与正常生成时
- * 完全一致。其它 Loader（普通加载、压缩指示等）原样不动。
+ * 所以补丁打在它们的基类 `Loader.prototype.updateDisplay` 上，只对
+ * `kind` 命中的实例生效——文案换成我们「工作中」那套**呼吸文字**，spinner 换成
+ * 月相、节拍换成 `WORKING_INTERVAL_MS`，与正常生成时完全一致。
+ * 这两个指示器**不显示时钟/耗时**（压缩耗时另有摘要块在完成后展示）。
+ * 其它 Loader（普通加载、重试倒计时等）原样不动。
  */
 interface LoaderLike {
 	kind?: string;
@@ -113,29 +116,40 @@ interface LoaderLike {
 	intervalMs?: number;
 	restartAnimation?(): void;
 	updateDisplay(): void;
-	__uiStyleBranchStart?: number;
-	__uiStyleBranchPatched?: boolean;
+	__uiStyleStart?: number;
+	__uiStylePatched?: boolean;
 	[key: `ui-style:${string}`]: unknown;
 }
 
-/** 分支摘要时的文案（与"工作中"同款呼吸样式）。 */
+/** 分支摘要时的文案。 */
 export const BRANCH_SUMMARY_TEXT = "摘要生成中";
+/** 上下文压缩时的文案。 */
+export const COMPACTION_TEXT = "压缩上下文中";
 
-export function patchBranchSummaryIndicator(): void {
+/** kind → 文案（只处理这两种"元事件"指示器）。 */
+const STATUS_TEXT_BY_KIND: Record<string, string> = {
+	branchSummary: BRANCH_SUMMARY_TEXT,
+	compaction: COMPACTION_TEXT,
+};
+
+/** 打补丁：分支摘要 + 上下文压缩的指示器文案/动画统一成「工作中」那套。 */
+export function patchSummaryStatusIndicators(): void {
 	const proto = Loader.prototype as unknown as LoaderLike;
 	const originalUpdateDisplay = proto.updateDisplay;
 	const patched = function (this: LoaderLike): void {
-		if (this.kind === "branchSummary") {
-			if (!this.__uiStyleBranchPatched) {
-				this.__uiStyleBranchPatched = true;
-				this.__uiStyleBranchStart = Date.now();
-				// 换成工作中的月相与节拍（构造函数里已经 start 过一次，这里重启动画）。
+		const text = this.kind === undefined ? undefined : STATUS_TEXT_BY_KIND[this.kind];
+		if (text !== undefined) {
+			if (!this.__uiStylePatched) {
+				this.__uiStylePatched = true;
+				this.__uiStyleStart = Date.now();
+				// 换成工作中的月相与节拍（构造函数里已 start 过一次，这里重启动画）。
 				this.frames = [...WORKING_FRAMES];
 				this.intervalMs = WORKING_INTERVAL_MS;
 				this.restartAnimation?.();
 			}
-			const elapsed = Date.now() - (this.__uiStyleBranchStart ?? Date.now());
-			this.message = workingMessage(elapsed, BRANCH_SUMMARY_TEXT);
+			const elapsed = Date.now() - (this.__uiStyleStart ?? Date.now());
+			// 只有文案；时钟/耗时留给完成后的摘要块，这里不显示。
+			this.message = workingMessage(elapsed, text);
 		}
 		originalUpdateDisplay.call(this);
 	};
@@ -144,7 +158,8 @@ export function patchBranchSummaryIndicator(): void {
 	});
 }
 
-export function unpatchBranchSummaryIndicator(): void {
+/** 恢复 pi 原来的指示器文案。 */
+export function unpatchSummaryStatusIndicators(): void {
 	unpatchPrototypeSlots(
 		Loader.prototype as unknown as LoaderLike,
 		"ui-style:loader-status",
@@ -278,7 +293,7 @@ class RoundedEditor extends CustomEditor {
 
 export function setupRoundedEditor(pi: ExtensionAPI): void {
 	// 工厂期就打上：/tree 的摘要指示器随时可能出现。
-	patchBranchSummaryIndicator();
+	patchSummaryStatusIndicators();
 	/** 统一动画节拍的退订函数（见 core.subscribeAnimationTick）。 */
 	let unsubscribeBreath: (() => void) | undefined;
 	let breathingStartedAt = 0;
@@ -308,7 +323,7 @@ export function setupRoundedEditor(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		// shutdown 时会恢复原型，所以每个新会话都要重打（幂等）。
-		patchBranchSummaryIndicator();
+		patchSummaryStatusIndicators();
 		stopBreathing();
 		applyWorkingStyle(ctx);
 		ctx.ui.setEditorComponent((tui, theme, keybindings) =>
@@ -333,6 +348,6 @@ export function setupRoundedEditor(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", () => {
 		stopBreathing();
 		// 恢复 pi 自己的文案（/reload 时旧闭包不能留在 Loader 原型上）。
-		unpatchBranchSummaryIndicator();
+		unpatchSummaryStatusIndicators();
 	});
 }

@@ -3212,45 +3212,67 @@ test("压缩中指示：5 行窗口按时间自动下滚（流式观感）", asy
 	}
 });
 
-test("/tree 分支摘要指示器：文案换成「摘要生成中」+ 月相帧（与工作中同款）", async () => {
-	const { patchBranchSummaryIndicator, unpatchBranchSummaryIndicator, BRANCH_SUMMARY_TEXT, workingMessage } =
-		await import("../editor.ts");
+test("摘要/压缩指示器：文案换成「摘要生成中」/「压缩上下文中」+ 月相帧（与工作中同款）", async () => {
+	const {
+		patchSummaryStatusIndicators,
+		unpatchSummaryStatusIndicators,
+		BRANCH_SUMMARY_TEXT,
+		COMPACTION_TEXT,
+		workingMessage,
+	} = await import("../editor.ts");
 	const { Loader } = await import("@earendil-works/pi-tui");
+	const { ICON_CLOCK } = await import("../core.ts");
 
-	patchBranchSummaryIndicator();
-	let loader;
-	try {
-		loader = new Loader(undefined, (t) => t, (t) => t);
-		// pi 的 BranchSummaryStatusIndicator 会带 kind = "branchSummary"
-		loader.kind = "branchSummary";
+	patchSummaryStatusIndicators();
+	const make = (kind) => {
+		const loader = new Loader(undefined, (t) => t, (t) => t);
+		loader.kind = kind;
 		loader.updateDisplay();
-		const lines = loader.render(80).map(strip);
-		const text = lines.join("\n");
+		return loader;
+	};
+	const branch = make("branchSummary");
+	const compaction = make("compaction");
+	const plain = new Loader(undefined, (t) => t, (t) => t);
+	plain.updateDisplay();
+	try {
+		// ① 分支摘要
+		const branchText = branch.render(80).map(strip).join("\n");
+		assert.ok(branchText.includes(BRANCH_SUMMARY_TEXT), `应显示「摘要生成中」：\n${branchText}`);
+		assert.ok(!branchText.includes("Summarizing branch"), `不该再有 pi 的英文文案：\n${branchText}`);
 
-		assert.ok(text.includes(BRANCH_SUMMARY_TEXT), `应显示「摘要生成中」：\n${JSON.stringify(text)}`);
-		assert.ok(!text.includes("Summarizing branch"), `不该再有 pi 的英文文案：\n${text}`);
-		// 月相帧（取自"工作中"同事的 WORKING_FRAMES）
-		assert.ok(/[🌕🌖🌗🌘🌑🌒🌓🌔]/.test(text), `应使用月相 spinner：\n${text}`);
-		// 呼吸换色：同一行里有多个 24-bit 前景色
-		const colors = new Set([...loader.render(80).join("").matchAll(/38;2;\d+;\d+;\d+/g)].map((m) => m[0]));
-		assert.ok(colors.size >= 2, `应逐字符呼吸换色，实际 ${colors.size} 种颜色`);
+		// ② 上下文压缩：同样换成「压缩上下文中」，且**不显示时钟/耗时**
+		const compactionText = compaction.render(80).map(strip).join("\n");
+		assert.ok(compactionText.includes(COMPACTION_TEXT), `应显示「压缩上下文中」：\n${compactionText}`);
+		assert.ok(!compactionText.includes("Compacting context"), `不该再有 pi 的英文文案：\n${compactionText}`);
+		assert.ok(!compactionText.includes(ICON_CLOCK), `压缩指示不应有时钟图标：\n${compactionText}`);
+		assert.doesNotMatch(compactionText, /\d+\.\d+s/, `压缩指示不应有耗时数字：\n${compactionText}`);
 
-		// 其它 Loader 不受影响
-		const plain = new Loader(undefined, (t) => t, (t) => t);
-		plain.updateDisplay();
+		// ③ 都是月相 + 呼吸换色
+		for (const text of [branchText, compactionText]) {
+			assert.ok(/[🌕🌖🌗🌘🌑🌒🌓🌔]/.test(text), `应使用月相 spinner：\n${text}`);
+		}
+		for (const loader of [branch, compaction]) {
+			const colors = new Set(
+				[...loader.render(80).join("").matchAll(/38;2;\d+;\d+;\d+/g)].map((m) => m[0]),
+			);
+			assert.ok(colors.size >= 2, `应逐字符呼吸换色，实际 ${colors.size} 种颜色`);
+		}
+
+		// ④ 其它 Loader 不受影响
 		assert.ok(
 			strip(plain.render(80).join("\n")).includes("Loading..."),
 			"普通 Loader 不该被改写",
 		);
-		plain.stop();
 	} finally {
-		// 打补丁时会重启 Loader 的 spinner 定时器（真实 pi 里由 pi 自己 stop）；
-		// 测试里必须手动停掉，否则 node --test 不会退出。
-		loader?.stop();
-		unpatchBranchSummaryIndicator();
+		// Loader 会自建 spinner 定时器；测试里必须停掉，否则 node --test 不退出。
+		branch.stop();
+		compaction.stop();
+		plain.stop();
+		unpatchSummaryStatusIndicators();
 	}
 
 	// 文案函数本身：默认"工作中"，传参可换字
 	assert.ok(strip(workingMessage(0)).includes("工作中"));
 	assert.ok(strip(workingMessage(0, BRANCH_SUMMARY_TEXT)).includes(BRANCH_SUMMARY_TEXT));
+	assert.ok(strip(workingMessage(0, COMPACTION_TEXT)).includes(COMPACTION_TEXT));
 });
