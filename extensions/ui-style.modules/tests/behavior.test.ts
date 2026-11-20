@@ -3753,3 +3753,38 @@ test("信息面板：显示会话创建的具体日期时间（拿不到时退�
 	const fallbackText = fallback.map((row) => strip(row.text)).join("\n");
 	assert.match(fallbackText, /1 m 0 s/, `没有创建时间时应退回 wallMs：\n${fallbackText}`);
 });
+
+test("子代理结果弹窗：结论按 markdown 渲染（语法符号被消费，不是原始文本）", async () => {
+	const { ChildResultOverlay } = await import("../subagent-result-overlay.ts");
+	const body = [
+		"## 结论",
+		"",
+		"发现 **3 处** 错误，在 `src/auth/` 里：",
+		"",
+		"- 参数类型不匹配",
+		"- 未处理 undefined",
+	].join("\n");
+	const overlay = new ChildResultOverlay({
+		payload: { title: "scout", body },
+		theme,
+		done: () => {},
+		cols: 100,
+		rows: 40,
+	});
+	const lines = overlay.render(overlay.preferredWidth()).map(strip);
+	const text = lines.join("\n");
+
+	// 语法符号被消费掉（这正是"渲染后"与"原始文本"的区别）
+	assert.doesNotMatch(text, /\*\*/, `粗体标记应被渲染掉：\n${text}`);
+	assert.doesNotMatch(text, /`/, `行内代码标记应被渲染掉：\n${text}`);
+	assert.doesNotMatch(text, /^#/m, `标题标记应被渲染掉：\n${text}`);
+	// 内容本身还在
+	assert.match(text, /结论/);
+	assert.match(text, /3 处/);
+	assert.match(text, /src\/auth\//);
+	// 列表保留项目符号
+	assert.match(text, /- 参数类型不匹配/);
+	// 渲染前后都不超宽，且每行等宽
+	const widths = new Set(lines.map((line) => visibleWidth(line)));
+	assert.equal(widths.size, 1, `每行宽度应一致：${[...widths].join(",")}`);
+});

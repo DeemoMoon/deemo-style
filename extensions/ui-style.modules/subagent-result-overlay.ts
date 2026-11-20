@@ -7,6 +7,9 @@
  *   - 运行中的块本身在不断重建（每帧），点击留给 pi 的"展开/收起"；
  *     **完成后**点击某个子代理，弹一个只含结论的只读窗口更直接。
  *
+ * 结论按 **markdown 渲染**（与 pi 渲染助手消息同一套 token）：子代理的结论基本
+ * 都是 md（列表、代码块、粗体），原样输出会看到一堆 `**` 和 ``` 符号。
+ *
  * 拦截方式：pi 的 `MouseRegion.handleMouse` 会**先把事件转发给子组件**
  * （`dispatchMouseEvent(child, event)`），子组件返回结果就用子组件的。所以视图实现
  * `handleMouse` 即可在 pi 的"点击展开"之前拿到点击；返回 `{ handled: true }` 阻止冒泡。
@@ -15,17 +18,19 @@
  */
 
 import {
+	Markdown,
 	isKeyRelease,
 	matchesKey,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
 	type Component,
+	type MarkdownTheme,
 	type TUI,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { highlightCode, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { BOLD_OFF, BOLD_ON, cleanText, DIM_GRAY, ICON_CLOCK, MUTED, RESET_FG } from "./core.ts";
 import {
 	ICON_SUBAGENT,
@@ -112,6 +117,79 @@ export function childResultTitle(child: SubagentChildLike, elapsed?: string): st
 }
 
 /**
+ * 内容自然宽度 = 按上限宽度渲染一遍后，最长一行的可见宽度（去掉补齐的空格）。
+ *
+ * 之所以要渲染一遍：mardown 会**去掉**语法符号（`**粗体**` → `粗体`），也会**加**缩进
+ * （代码块每行 +2）。用原文长度算出来的盒子要么留白过多，要么把代码行切掉。
+ * 渲染抛错时退回原文宽度。
+ */
+function naturalContentWidth(markdown: Markdown, body: string, maxContent: number): number {
+	try {
+		let widest = 0;
+		for (const line of markdown.render(maxContent)) {
+			widest = Math.max(widest, visibleWidth(cleanText(line).trimEnd()));
+		}
+		// 再夹一次下限：短结论（"已修复"这种）不能弹出一个 12 列的小盒子。
+		if (widest > 0) return Math.max(MIN_CONTENT_WIDTH, Math.min(widest, maxContent));
+	} catch {
+		// 落到原文宽度
+	}
+	const raw = body
+		.split("\n")
+		.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
+	return Math.max(MIN_CONTENT_WIDTH, Math.min(raw, maxContent));
+}
+
+/** `theme.fg` 的可选调用版（单测桩里可能没有这个方法）。 */
+function fgToken(theme: Theme, token: string, text: string): string {
+	const fg = theme.fg as unknown as ((token: string, text: string) => string) | undefined;
+	return typeof fg === "function" ? (fg.call(theme, token, text) ?? text) : text;
+}
+
+/**
+ * 用弹窗自己那份 pi Theme 拼出 MarkdownTheme。
+ *
+ * 不用全局的 `getMarkdownTheme()`：那个依赖模块级 `theme` 变量（未 init 时会抛），
+ * 而这里已经拿到了 Theme 实例。token 名与 pi 的助手消息渲染完全一致
+ * （mdHeading/mdCode/mdListBullet…），所以弹窗里的 markdown 观感与正文一致。
+ * 单测桩 theme 只有 `fg`，其余方法可能缺失 —— 一律走可选调用。
+ */
+function markdownThemeFor(theme: Theme): MarkdownTheme {
+	const color = (token: string, text: string): string => fgToken(theme, token, text);
+	const style = (name: "bold" | "italic" | "underline" | "strikethrough", text: string): string => {
+		const fn = theme[name] as unknown as ((text: string) => string) | undefined;
+		return typeof fn === "function" ? (fn.call(theme, text) ?? text) : text;
+	};
+	return {
+		heading: (text) => color("mdHeading", text),
+		link: (text) => color("mdLink", text),
+		linkUrl: (text) => color("mdLinkUrl", text),
+		code: (text) => color("mdCode", text),
+		codeBlock: (text) => color("mdCodeBlock", text),
+		codeBlockBorder: (text) => color("mdCodeBlockBorder", text),
+		quote: (text) => color("mdQuote", text),
+		quoteBorder: (text) => color("mdQuoteBorder", text),
+		hr: (text) => color("mdHr", text),
+		listBullet: (text) => color("mdListBullet", text),
+		bold: (text) => style("bold", text),
+		italic: (text) => style("italic", text),
+		underline: (text) => style("underline", text),
+		strikethrough: (text) => style("strikethrough", text),
+		// 代码块语法高亮沿用 pi 的实现；测试环境里全局主题可能没 init，
+		// 抛错就退回无色原文（宁可没高亮，也不要整个弹窗炸掉）。
+		highlightCode: (code, lang) => {
+			try {
+				const lines = highlightCode(code, lang);
+				if (Array.isArray(lines) && lines.length > 0) return lines;
+			} catch {
+				// 落到下面
+			}
+			return code.split("\n");
+		},
+	};
+}
+
+/**
  * 只读结果弹窗。
  *
  * 视觉与其它 overlay 保持一致（圆角边框、标题、底部提示），内容按宽度折行，
@@ -132,6 +210,8 @@ export class ChildResultOverlay implements Component {
 	private readonly payload: OverlayPayload;
 	private readonly theme: Theme;
 	private readonly done: () => void;
+	/** 结论的 markdown 渲染器（自己带宽度缓存，宽度变了重渲染即可）。 */
+	private readonly markdown: Markdown;
 
 	constructor(options: {
 		payload: OverlayPayload;
@@ -143,14 +223,19 @@ export class ChildResultOverlay implements Component {
 		this.payload = options.payload;
 		this.theme = options.theme;
 		this.done = options.done;
+		this.markdown = new Markdown(
+			options.payload.body,
+			0,
+			0,
+			markdownThemeFor(options.theme),
+			{ color: (text) => fgToken(options.theme, "text", text) },
+		);
 		this.cols = options.cols;
 		this.rows = options.rows;
-		// 自动宽度：最长一行的可见宽度 + 边框与左右内边距（4 列）。
-		const natural = this.payload.body
-			.split("\n")
-			.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
+		// 自动宽度：先按**渲染后**的最长行决定（不能用原文，否则 `**`/``` 这类
+		// 语法符号会撑宽，而缩进又把代码行挤出去），再夹到 [MIN, 终端上限]。
 		const maxContent = Math.max(MIN_CONTENT_WIDTH, Math.min(this.cols - 6, MAX_CONTENT_WIDTH));
-		this.contentWidth = Math.max(MIN_CONTENT_WIDTH, Math.min(natural, maxContent));
+		this.contentWidth = naturalContentWidth(this.markdown, this.payload.body, maxContent);
 	}
 
 	/** 弹窗宽度（含边框与内边距）。 */
@@ -167,19 +252,32 @@ export class ChildResultOverlay implements Component {
 	invalidate(): void {
 		this.wrappedFor = undefined;
 		this.wrapped = [];
+		this.markdown.invalidate();
 	}
 
-	/** 正文行（按内容宽度折行；已缓存）。 */
+	/**
+	 * 正文行：交给 Markdown 组件渲染（标题/列表/代码块/粗体都排好版），已缓存。
+	 *
+	 * Markdown 自己会按宽度缓存，但"内容宽度"是弹窗算出来的，宽度一变就必须
+	 * 重新 render —— 而且它输出的是**补齐到宽度**的行（尾部空格），这里只管
+	 * 截断兜底，不必再去尾（外层 padRight 会处理）。
+	 */
 	private bodyLines(width: number): string[] {
 		const contentWidth = Math.max(1, Math.min(this.contentWidth, width - 4));
 		if (this.wrappedFor === contentWidth) return this.wrapped;
-		const out: string[] = [];
-		for (const line of this.payload.body.split("\n")) {
-			if (line === "") {
-				out.push("");
-				continue;
+		let out: string[];
+		try {
+			out = this.markdown.render(contentWidth).map((line) => truncateToWidth(line, contentWidth, ""));
+		} catch {
+			// markdown 解析异常时退回原文折行：弹窗宁可朴素，也不能打不开。
+			out = [];
+			for (const line of this.payload.body.split("\n")) {
+				if (line === "") {
+					out.push("");
+					continue;
+				}
+				out.push(...wrapTextWithAnsi(fgToken(this.theme, "text", line), contentWidth));
 			}
-			out.push(...wrapTextWithAnsi(this.theme.fg("text", line), contentWidth));
 		}
 		this.wrappedFor = contentWidth;
 		this.wrapped = out;
