@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.4] - 2026-11-19
+
+### `/tree` 分支摘要指示器：换成「摘要生成中」+ 工作中同款动画
+- pi 生成分支摘要时挂的 `BranchSummaryStatusIndicator` 文案固定是
+  `Summarizing branch... (esc to cancel)`，且该类**没有导出**，改不到实例。
+  改为在它的基类 `Loader.prototype.updateDisplay` 上打补丁：只对
+  `kind === "branchSummary"` 的实例生效——文案换成我们「工作中」那套**呼吸文字**
+  （`摘要生成中`），spinner 换成月相、节拍换成 `WORKING_INTERVAL_MS`，与正常生成
+  时完全一致。其它 Loader（普通加载、压缩指示）原样不动。
+- 补丁在工厂期与每个 `session_start` 重打（幂等），`session_shutdown` 恢复原型
+  ——否则 `/reload` 时旧闭包会一直挂在 `Loader` 上。
+
 ## [1.3.3] - 2026-11-19
 
 ### 摘要块：耗时、滚动原文、前后对比

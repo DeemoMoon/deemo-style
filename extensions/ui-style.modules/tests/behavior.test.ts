@@ -3211,3 +3211,46 @@ test("压缩中指示：5 行窗口按时间自动下滚（流式观感）", asy
 		Date.now = realNow;
 	}
 });
+
+test("/tree 分支摘要指示器：文案换成「摘要生成中」+ 月相帧（与工作中同款）", async () => {
+	const { patchBranchSummaryIndicator, unpatchBranchSummaryIndicator, BRANCH_SUMMARY_TEXT, workingMessage } =
+		await import("../editor.ts");
+	const { Loader } = await import("@earendil-works/pi-tui");
+
+	patchBranchSummaryIndicator();
+	let loader;
+	try {
+		loader = new Loader(undefined, (t) => t, (t) => t);
+		// pi 的 BranchSummaryStatusIndicator 会带 kind = "branchSummary"
+		loader.kind = "branchSummary";
+		loader.updateDisplay();
+		const lines = loader.render(80).map(strip);
+		const text = lines.join("\n");
+
+		assert.ok(text.includes(BRANCH_SUMMARY_TEXT), `应显示「摘要生成中」：\n${JSON.stringify(text)}`);
+		assert.ok(!text.includes("Summarizing branch"), `不该再有 pi 的英文文案：\n${text}`);
+		// 月相帧（取自"工作中"同事的 WORKING_FRAMES）
+		assert.ok(/[🌕🌖🌗🌘🌑🌒🌓🌔]/.test(text), `应使用月相 spinner：\n${text}`);
+		// 呼吸换色：同一行里有多个 24-bit 前景色
+		const colors = new Set([...loader.render(80).join("").matchAll(/38;2;\d+;\d+;\d+/g)].map((m) => m[0]));
+		assert.ok(colors.size >= 2, `应逐字符呼吸换色，实际 ${colors.size} 种颜色`);
+
+		// 其它 Loader 不受影响
+		const plain = new Loader(undefined, (t) => t, (t) => t);
+		plain.updateDisplay();
+		assert.ok(
+			strip(plain.render(80).join("\n")).includes("Loading..."),
+			"普通 Loader 不该被改写",
+		);
+		plain.stop();
+	} finally {
+		// 打补丁时会重启 Loader 的 spinner 定时器（真实 pi 里由 pi 自己 stop）；
+		// 测试里必须手动停掉，否则 node --test 不会退出。
+		loader?.stop();
+		unpatchBranchSummaryIndicator();
+	}
+
+	// 文案函数本身：默认"工作中"，传参可换字
+	assert.ok(strip(workingMessage(0)).includes("工作中"));
+	assert.ok(strip(workingMessage(0, BRANCH_SUMMARY_TEXT)).includes(BRANCH_SUMMARY_TEXT));
+});

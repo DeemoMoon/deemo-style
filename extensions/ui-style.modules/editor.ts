@@ -3,6 +3,7 @@
  */
 
 import {
+	Loader,
 	type EditorTheme,
 	type TUI,
 	type TuiMouseEvent,
@@ -24,7 +25,9 @@ import {
 	RESET_FG,
 	sgr,
 	SKY_BLUE,
+	patchPrototypeSlots,
 	subscribeAnimationTick,
+	unpatchPrototypeSlots,
 } from "./core.ts";
 import type { Rgb } from "./core.ts";
 
@@ -81,8 +84,8 @@ function breathRoll(elapsedMs: number): number {
 }
 
 /** 工作中文案：亮黄 ↔ 暗紫 左右滚动的呼吸换色（逐字符着色）。 */
-function workingMessage(elapsedMs: number): string {
-	const chars = Array.from(WORKING_TEXT);
+export function workingMessage(elapsedMs: number, text = WORKING_TEXT): string {
+	const chars = Array.from(text);
 	const roll = breathRoll(elapsedMs);
 	const span = Math.max(1, chars.length - 1);
 	let out = BOLD_ON;
@@ -92,6 +95,61 @@ function workingMessage(elapsedMs: number): string {
 		out += `${sgr(mixRgb(BREATH_YELLOW, BREATH_PURPLE, wave))}${chars[index]}`;
 	}
 	return `${out}${BOLD_OFF}${RESET_FG}`;
+}
+
+/**
+ * pi 在 `/tree` 生成分支摘要时会挂一个 `BranchSummaryStatusIndicator`，文案固定为
+ * "Summarizing branch... (esc to cancel)"（类没导出，改不到实例）。
+ *
+ * 这里改在它的基类 `Loader.prototype.updateDisplay` 上：只对
+ * `kind === "branchSummary"` 的实例生效——把文案换成我们工作中那套**呼吸文字**
+ * （"摘要生成中"），帧也换成月相、节拍换成 `WORKING_INTERVAL_MS`，与正常生成时
+ * 完全一致。其它 Loader（普通加载、压缩指示等）原样不动。
+ */
+interface LoaderLike {
+	kind?: string;
+	message?: string;
+	frames?: string[];
+	intervalMs?: number;
+	restartAnimation?(): void;
+	updateDisplay(): void;
+	__uiStyleBranchStart?: number;
+	__uiStyleBranchPatched?: boolean;
+	[key: `ui-style:${string}`]: unknown;
+}
+
+/** 分支摘要时的文案（与"工作中"同款呼吸样式）。 */
+export const BRANCH_SUMMARY_TEXT = "摘要生成中";
+
+export function patchBranchSummaryIndicator(): void {
+	const proto = Loader.prototype as unknown as LoaderLike;
+	const originalUpdateDisplay = proto.updateDisplay;
+	const patched = function (this: LoaderLike): void {
+		if (this.kind === "branchSummary") {
+			if (!this.__uiStyleBranchPatched) {
+				this.__uiStyleBranchPatched = true;
+				this.__uiStyleBranchStart = Date.now();
+				// 换成工作中的月相与节拍（构造函数里已经 start 过一次，这里重启动画）。
+				this.frames = [...WORKING_FRAMES];
+				this.intervalMs = WORKING_INTERVAL_MS;
+				this.restartAnimation?.();
+			}
+			const elapsed = Date.now() - (this.__uiStyleBranchStart ?? Date.now());
+			this.message = workingMessage(elapsed, BRANCH_SUMMARY_TEXT);
+		}
+		originalUpdateDisplay.call(this);
+	};
+	patchPrototypeSlots(proto, "ui-style:loader-status", {
+		updateDisplay: patched as unknown as () => void,
+	});
+}
+
+export function unpatchBranchSummaryIndicator(): void {
+	unpatchPrototypeSlots(
+		Loader.prototype as unknown as LoaderLike,
+		"ui-style:loader-status",
+		["updateDisplay"],
+	);
 }
 
 class RoundedEditor extends CustomEditor {
@@ -219,6 +277,8 @@ class RoundedEditor extends CustomEditor {
 }
 
 export function setupRoundedEditor(pi: ExtensionAPI): void {
+	// 工厂期就打上：/tree 的摘要指示器随时可能出现。
+	patchBranchSummaryIndicator();
 	/** 统一动画节拍的退订函数（见 core.subscribeAnimationTick）。 */
 	let unsubscribeBreath: (() => void) | undefined;
 	let breathingStartedAt = 0;
@@ -247,6 +307,8 @@ export function setupRoundedEditor(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		// shutdown 时会恢复原型，所以每个新会话都要重打（幂等）。
+		patchBranchSummaryIndicator();
 		stopBreathing();
 		applyWorkingStyle(ctx);
 		ctx.ui.setEditorComponent((tui, theme, keybindings) =>
@@ -270,5 +332,7 @@ export function setupRoundedEditor(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", () => {
 		stopBreathing();
+		// 恢复 pi 自己的文案（/reload 时旧闭包不能留在 Loader 原型上）。
+		unpatchBranchSummaryIndicator();
 	});
 }
