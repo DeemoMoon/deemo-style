@@ -274,8 +274,6 @@ export const PREVIEW_CONNECTOR_WIDTH = PREVIEW_CONNECTOR_LEAD.length + 1 + PREVI
 export const PREVIEW_CONNECTOR_FIRST = `${PREVIEW_CONNECTOR_LEAD}⎿${PREVIEW_CONNECTOR_GAP}`;
 export const PREVIEW_CONNECTOR_REST = " ".repeat(PREVIEW_CONNECTOR_WIDTH);
 
-// 路径显示工具单独成文件（path-text.ts），这里 re-export 保持既有 import 路径不变
-export * from "./path-text.ts";
 
 export interface ThemeLike {
 	fg(token: string, text: string): string;

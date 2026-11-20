@@ -42,6 +42,7 @@
 - `core.ts`（1263 行）拆成 `theme.ts`（配色/图标/对齐/扫光）、`text.ts`（格式化/ANSI/
   折叠预览/上下文缓存/动画节拍）、`tail.ts`（CachedView / LiveTailView /
   IndentedPreviewView）；`core.ts` 只做 `export *`，其它模块 import 路径不变。
+  `path-text.ts` 只由 `core.ts` 聚合一次（拆分时曾在 `theme.ts` 里重复 re-export）。
 
 ### 文档
 - 测试数同步为 124（仓库 README 与 `ui-style.modules/README.md`）。
