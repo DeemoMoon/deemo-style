@@ -36,6 +36,7 @@ import {
 	shimmerFrame,
 	shimmerText,
 	patchPrototypeSlots,
+	prototypeOriginal,
 	unpatchPrototypeSlots,
 	tailWindow,
 	stripAnsi,
@@ -71,9 +72,12 @@ function recordRenderedLines(timestamp: number, lines: number): void {
 	lastRecorded = { timestamp, lines };
 	// 只留最近的若干条：会话很长时不至于无限增长
 	if (renderedLinesByMessage.size > 200) {
-		const oldest = Math.min(...renderedLinesByMessage.keys());
-		renderedLinesByMessage.delete(oldest);
-		renderedSeqByMessage.delete(oldest);
+		// Map 保持插入序：直接取第一个键就是最早的一条，避免每帧展开 200 元素数组。
+		const oldest = renderedLinesByMessage.keys().next().value;
+		if (oldest !== undefined) {
+			renderedLinesByMessage.delete(oldest);
+			renderedSeqByMessage.delete(oldest);
+		}
 	}
 }
 
@@ -174,6 +178,7 @@ interface RuntimePrototype {
 	__piAssistantHideThinkingUserSet?: boolean;
 	/** 用户点击后写入的展开/折叠覆盖，键为 thinking runIndex。 */
 	thinkingVisibilityOverrides?: Map<number, boolean>;
+	markdownTheme?: { codeBlockIndent?: string };
 	outputPad?: number;
 	isStreaming?: boolean;
 	contentContainer?: {
@@ -493,7 +498,7 @@ const THINKING_TAIL_LINES = 12;
 /**
  * 思考块窗口内容的刷新节拍（毫秒）。
  *
- * 高速流式时文本每帧都在长；每帧都重排尾窗会让 6 行的小窗口一直在"往上顶"，
+ * 高速流式时文本每帧都在长；每帧都重排尾窗会让 12 行的小窗口一直在"往上顶"，
  * 看起来就是抖。按 ~7Hz 取快照，滚动变成稳定的步进。
  */
 const THINKING_REFRESH_MS = 150;
@@ -594,7 +599,7 @@ class ThinkingPreviewView extends CachedView {
 	}
 
 	/**
-	 * 尾窗（6 行）：运行中与完成后都定格在同一位置；只显示最新内容，
+	 * 尾窗（12 行）：运行中与完成后都定格在同一位置；只显示最新内容，
 	 * 顶部一行 dim、其余 muted（终端做不了纵向渐变，按行分档就能读出"在往上流"）。
 	 */
 	protected renderLines(width: number): string[] {
@@ -725,12 +730,16 @@ function applyThinkingHeaders(
 export function patchAssistantMessageStyle(): void {
 	const proto = AssistantMessageComponent.prototype as unknown as RuntimePrototype;
 
-	// 先在补丁体外捕获原方法：patchPrototypeSlots 内部会先做一次恢复再重打，
-	// 在原方法槽位上读取才是 pi 的实现（补丁幂等由 patchPrototypeSlots 保证）。
-	const originalRender = proto.render;
-	const originalHandleMouse = proto.handleMouse;
-	const originalUpdateContent = proto.updateContent;
-	const originalSetHideThinkingBlock = proto.setHideThinkingBlock;
+	// 从 original 槽位取 pi 的实现：/reload 时新模块可能先于旧模块的 unpatch 加载，
+	// 直接读 proto.render 会把旧补丁当成 original，套出一层旧闭包。
+	const originalRender = prototypeOriginal(proto, "ui-style:assistant", "render");
+	const originalHandleMouse = prototypeOriginal(proto, "ui-style:assistant", "handleMouse");
+	const originalUpdateContent = prototypeOriginal(proto, "ui-style:assistant", "updateContent");
+	const originalSetHideThinkingBlock = prototypeOriginal(
+		proto,
+		"ui-style:assistant",
+		"setHideThinkingBlock",
+	);
 
 	const patchedRender = function (this: RuntimePrototype, width: number): string[] {
 		// 终端极窄时不做缩进，避免行宽溢出。
@@ -789,6 +798,11 @@ export function patchAssistantMessageStyle(): void {
 		// thinking 块（折叠预览/展开正文）的行不加 GUTTER：块左边缘与助手图标、
 		// 工具面板同列。掩码与行数组同步过滤，保证下标不错位。
 		const { mask: thinkMask, textLine } = analyzeContentLayout(this, contentWidth);
+		// 围栏行删除依赖“代码内容行带缩进”。用户把 markdown.codeBlockIndent 设为空
+		// （或缩进不比 outputPad 宽）时，代码块里作为示例出现的 ``` 行会被误删，
+		// 此时宁可不删围栏，也不能吃内容。
+		const codeIndent = this.markdownTheme?.codeBlockIndent;
+		const fenceRemovalSafe = typeof codeIndent !== "string" || codeIndent.length > padding;
 
 		const bodies: string[] = [];
 		const lineThinking: boolean[] = [];
@@ -805,7 +819,8 @@ export function patchAssistantMessageStyle(): void {
 			// 去掉代码块的围栏边框行（```lang / ```）。渲染器把它们作为独立行输出，
 			// 这里过滤掉，只保留缩进 + 语法高亮的代码内容。
 			// 只对助手正文生效：thinking 预览/展开正文里的 ``` 是真实内容，删掉会丢字。
-			if (!thinking && isFenceBorderLine(body)) {
+			// includes 快路径：绝大多数字符串没有反引号，不必每行 stripAnsi + 正则。
+			if (fenceRemovalSafe && !thinking && body.includes("```") && isFenceBorderLine(body)) {
 				pendingMarkers += LEADING_CONTROL.exec(body)?.[0] ?? "";
 				continue;
 			}
@@ -878,6 +893,10 @@ export function patchAssistantMessageStyle(): void {
 	if (originalHandleMouse) {
 		patchedHandleMouse = function (this: RuntimePrototype, event: MouseEventLike): unknown {
 			try {
+				// 窄屏下 render 走原生渲染（不加缩进），鼠标坐标也不该再减 GUTTER。
+				if (!Number.isFinite(event.width) || event.width <= GUTTER + 2) {
+					return originalHandleMouse.call(this, event);
+				}
 				// 子组件布局宽度是 contentWidth，按它换算才能命中 Container 的 mouseLayout 缓存。
 				const innerWidth = event.width - GUTTER;
 				if (innerWidth <= 0) return originalHandleMouse.call(this, event);
@@ -925,9 +944,9 @@ export function patchAssistantMessageStyle(): void {
 			message?: unknown,
 			isStreaming?: boolean,
 		): void {
-			// 只在用户尚未显式切换过时默认折叠：pi 的 toggleThinkingBlockVisibility /
-			// 设置面板会调 setHideThinkingBlock，那里会打上“用户已选择”标记，
-			// 之后这里不再覆盖，否则全局“显示思考”永远失效。
+			// 本扩展的默认视觉是折叠思考块（给预览+耗时）；pi 的设置
+			// hideThinkingBlock 在扩展启用时会被这个默认值覆盖，直到用户按 Ctrl+T
+			// 显式切换一次（setHideThinkingBlock 会打上标记，之后不再覆盖）。
 			if (!this.__piAssistantHideThinkingUserSet) this.hideThinkingBlock = true;
 			// 渲染缓存失效信号：内容重建（包括 thinking 展开/收起、换预览）都经过这里。
 			this.__piAssistantStyleVersion = (this.__piAssistantStyleVersion ?? 0) + 1;

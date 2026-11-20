@@ -38,15 +38,18 @@ export function stripHomePrefix(
 	caseInsensitive: boolean,
 ): string | undefined {
 	if (!home) return undefined;
-	// 去掉 home 末尾的分隔符（根目录 "/" 除外），否则 "/home/u/" 和 "/home/u" 表现不一致。
-	const base = home.length > 1 ? home.replace(/[\\/]+$/, "") : home;
+	// 盘符根（C:\ / C:/）不能去掉末尾分隔符，否则 base 会退化成 "C:"，
+	// 把整个磁盘都当成 home。
+	const driveRoot = /^[A-Za-z]:[\\/]$/u.test(home);
+	// 去掉 home 末尾的分隔符（根目录 "/" 与盘符根除外），否则 "/home/u/" 和 "/home/u" 表现不一致。
+	const base = driveRoot ? home : home.length > 1 ? home.replace(/[\\/]+$/u, "") : home;
 	if (path.length < base.length) return undefined;
 	const head = path.slice(0, base.length);
 	const matched = caseInsensitive ? head.toLowerCase() === base.toLowerCase() : head === base;
 	if (!matched) return undefined;
 	const rest = path.slice(base.length);
-	// home 是根目录时（base === "/"）rest 天然不带前导分隔符，直接放行。
-	if (base === "/") return rest;
+	// home 是根目录 / 盘符根时，rest 天然不带前导分隔符，直接放行。
+	if (base === "/" || driveRoot) return rest;
 	// 其余情况 rest 必须为空或以分隔符开头：home 为 `C:\Users\x` 时不能把
 	// `C:\Users\x2` 误缩成 `~/2`。
 	return rest === "" || rest.startsWith("/") || rest.startsWith("\\") ? rest : undefined;
@@ -79,9 +82,12 @@ export function formatCwd(cwd: string): string {
  */
 export function shortenPathLine(path: string, budget: number, ellipsis = "…"): string {
 	if (budget <= 0) return "";
-	if (visibleWidth(path) <= budget) return path;
+	// 统一分隔符：调用方通常已经归一过，但这是导出工具，Windows 路径也不能退化成
+	// “只保留头部”的硬截断（那会丢掉最关键的项目名）。
+	const normalizedPath = path.replace(/\\/gu, "/");
+	if (visibleWidth(normalizedPath) <= budget) return normalizedPath;
 
-	const segments = path.split("/").filter(Boolean);
+	const segments = normalizedPath.split("/").filter(Boolean);
 	// 从右往左**一次**累加（保留末尾若干段），随时用 1 + 累计宽度 判断放不放得下，
 	// 不再每轮 `slice(-keep).join("/") + visibleWidth`（长路径下是 O(n²)）。
 	const budgetForSegments = budget - visibleWidth(ellipsis) - 1; // 减掉 "…/" 本身
@@ -95,6 +101,6 @@ export function shortenPathLine(path: string, budget: number, ellipsis = "…"):
 		kept += 1;
 	}
 	if (kept > 0) return `${ellipsis}/${segments.slice(-kept).join("/")}`;
-	return truncateToWidth(path, budget, ellipsis);
+	return truncateToWidth(normalizedPath, budget, ellipsis);
 }
 

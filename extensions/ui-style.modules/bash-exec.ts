@@ -7,6 +7,7 @@
 
 import {
 	Spacer,
+	Text,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -104,15 +105,7 @@ function composeLoaderLine(line: string, clock: string, inner: number): string {
  * 渲染缓存：结束态整框按内容签名缓存；运行态缓存静态部分（边框 + 命令 +
  * 输出），只有 loader 转圈行每帧重算——pi 的 loader 动画会持续触发整屏重绘。
  */
-/**
- * 视图结构版本：/reload 后组件实例上可能残留旧模块创建的视图，结构/逻辑都对不上，
- * 必须丢弃重建（旧实例的 render 走的是旧代码，也会拖住旧模块无法回收）。
- */
-const EXEC_VIEW_SCHEMA = 1;
-
 class ExecBoxView {
-	/** 结构标记：rebuildExecDisplay 据此判断能否复用实例上缓存的视图。 */
-	readonly execViewSchema = EXEC_VIEW_SCHEMA;
 	private readonly inst: BashExecLike;
 	private cacheKey?: string;
 	private cachedFull?: string[];
@@ -234,11 +227,13 @@ class ExecBoxView {
 
 	/** 框内内容：命令行 + 输出（+ 结束态的状态区）。结束态整框一起缓存。 */
 	private contentLines(inner: number, includeStatus: boolean): string[] {
+		// displayLines 有行/字节扫描，同一帧只算一次给 output/status 共用。
+		const display = this.displayLines();
 		return [
 			...this.commandSegments(inner, includeStatus),
-			...this.outputSegments(inner),
+			...this.outputSegments(inner, display),
 			...(includeStatus && this.inst.status !== "running"
-				? this.statusSegments(inner)
+				? this.statusSegments(inner, display)
 				: []),
 		];
 	}
@@ -312,9 +307,10 @@ class ExecBoxView {
 	 * 除了源行数/字节数，还要限制**换行后的可视行数**：一条没有换行的
 	 * 长行在 80 列下能变成几十上百行，仅靠源行数封顶挡不住。
 	 */
-	private outputSegments(inner: number): string[] {
-		const display = this.displayLines();
-		const lineLimit = Math.max(256, inner * 4);
+	private outputSegments(inner: number, display = this.displayLines()): string[] {
+		// 展开态已经按 50KB 封顶，不再把单行硬切到 256 字符（minified JSON / base64
+		// 会只剩开头一小段且没有任何提示）。折叠态仍用短上限控制每帧成本。
+		const lineLimit = this.inst.expanded ? MAX_EXEC_DISPLAY_BYTES : Math.max(256, inner * 4);
 		const segments: string[] = [];
 		for (const line of display) {
 			const safeLine =
@@ -328,15 +324,19 @@ class ExecBoxView {
 	}
 
 	/** 结束态的状态区：折叠提示 / 取消 / 退出码 / 截断提示。 */
-	private statusSegments(inner: number): string[] {
+	private statusSegments(inner: number, display = this.displayLines()): string[] {
 		const all = this.inst.outputLines;
-		const display = this.displayLines();
 		const statusParts: string[] = [];
 		const hiddenCount = all.length - display.length;
 		if (hiddenCount > 0) {
-			statusParts.push(
-				`${MUTED}... ${hiddenCount} more lines (${keyHint("app.tools.expand", "to expand")})${RESET_FG}`,
-			);
+			// 展开态已经按 1000 行 / 50KB 封顶，再按 Ctrl+O 只会收起，不会出现更多；
+			// 这里明确说是输出上限，而不是继续骗用户“to expand”。
+			if (this.inst.expanded) {
+				statusParts.push(`${MUTED}... ${hiddenCount} lines hidden (output limit)${RESET_FG}`);
+			} else {
+				const hint = keyHint("app.tools.expand", "to expand");
+				statusParts.push(`${MUTED}... ${hiddenCount} more lines (${hint})${RESET_FG}`);
+			}
 		}
 		if (this.inst.status === "cancelled") {
 			statusParts.push(fg24(WARN_YELLOW, "(cancelled)"));
@@ -361,7 +361,8 @@ class ExecBoxView {
 function rebuildExecDisplay(instance: BashExecLike): void {
 	// 复用同一个视图：pi 的 appendOutput 会为每块输出调一次 updateDisplay，
 	// 每块都 clear() + 新建组件会丢掉框的全部缓存。
-	if (instance.__piExecView?.execViewSchema === EXEC_VIEW_SCHEMA) {
+	// 用 instanceof 而不是版本号：/reload 后旧模块的视图类已经不同，必须重建。
+	if (instance.__piExecView instanceof ExecBoxView) {
 		instance.__piExecView.invalidate();
 		return;
 	}
@@ -374,8 +375,6 @@ function rebuildExecDisplay(instance: BashExecLike): void {
 
 export function patchBashExec(): void {
 	const proto = BashExecutionComponent.prototype as unknown as BashExecPrototype;
-	// 先捕获原方法：patchPrototypeSlots 内部会做一次恢复再重打（幂等）。
-	const originalUpdateDisplay = proto.updateDisplay;
 
 	const patchedUpdateDisplay = function (this: BashExecPrototype): void {
 		// `!` 命令也是有生命周期的块：running 开始计时，结束就地定格
@@ -385,13 +384,14 @@ export function patchBashExec(): void {
 		try {
 			rebuildExecDisplay(this);
 		} catch {
-			// 这里完全替换了 pi 的 updateDisplay：万一 pi 改了内部布局导致重建失败，
-			// 宁可退回 pi 自己的渲染，也不要把整块输出打没。
-			// 原生 updateDisplay() 会 clear + 重建 children；缓存的 ExecBoxView
-			// 如果还留在实例上，下次 updateDisplay 只会 invalidate 而不会重新挂载，
-			// 变成孤儿视图。这里顺手丢掉，让下次从原生组件重建。
+			// 重建失败时不能只调原生 updateDisplay：它写的是 contentContainer，
+			// 而 contentContainer 已经被 clear() 从 children 里摘掉。这里给一个
+			// 最小的只读回退块，至少命令行和最近的输出还在。
 			this.__piExecView = undefined;
-			originalUpdateDisplay.call(this);
+			this.clear();
+			this.addChild(new Spacer(1));
+			const tail = this.outputLines.slice(-EXEC_PREVIEW_LINES).join("\n");
+			this.addChild(new Text(`${this.command}${tail ? `\n${tail}` : ""}`, 0, 0));
 		}
 	};
 	patchPrototypeSlots(proto, "ui-style:bash-exec", { updateDisplay: patchedUpdateDisplay });

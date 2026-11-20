@@ -42,7 +42,6 @@ import {
 	processSummary,
 	RESULT_CONCLUSION_LINES,
 	RESULT_SINGLE_ITEMS,
-	RESULT_TEXT_LINES,
 	SUBAGENT_TAIL_LINES,
 	TASK_TEXT_RGB,
 	TASK_WRAP_CLOSE,
@@ -268,7 +267,13 @@ export class AgentBlockView extends CachedView {
 			activity.slice(-24),
 			this.child.usage.input,
 			this.child.usage.output,
+			this.child.usage.cacheRead,
+			this.child.usage.cacheWrite,
+			this.child.model ?? "",
+			this.child.errorMessage ?? "",
+			this.child.stderr,
 			this.resultText?.length ?? 0,
+			this.resultText?.slice(-24) ?? "",
 		].join("\u0000");
 	}
 
@@ -323,7 +328,7 @@ export class AgentBlockView extends CachedView {
 			//    （text 片段已经作结论显示过，这里只取 toolCall，避免同一段文字出现两遍）。
 			if (this.expanded) {
 				const process = processItems(displayItems(this.child.messages));
-				for (const line of collapsedItemLines(process, RESULT_SINGLE_ITEMS, theme, false)) {
+				for (const line of collapsedItemLines(process, RESULT_SINGLE_ITEMS, theme)) {
 					lines.push(`${UI_INDENT}${this.nest}${PREVIEW_CONNECTOR_REST}${line}`);
 				}
 			} else {
@@ -339,24 +344,19 @@ export class AgentBlockView extends CachedView {
 
 // ---- 结束态：折叠摘要 -------------------------------------------------------
 
-/** 折叠态的 display item 行（text 只取前几行，工具调用是一行摘要）。 */
+/** 折叠态的 display item 行（调用方已经用 processItems 过滤成纯工具调用）。 */
 export function collapsedItemLines(
 	items: readonly DisplayItem[],
 	limit: number,
 	theme: ThemeLike,
-	expanded: boolean,
 ): string[] {
 	const shown = items.slice(-limit);
 	const lines: string[] = [];
 	const skipped = items.length - shown.length;
 	if (skipped > 0) lines.push(theme.fg("muted", `... 前面还有 ${skipped} 项`));
 	for (const item of shown) {
-		if (item.type === "toolCall") {
-			lines.push(`${theme.fg("muted", "→ ")}${theme.fg("text", item.name)}`);
-			continue;
-		}
-		const body = expanded ? item.text : item.text.split("\n").slice(0, RESULT_TEXT_LINES).join("\n");
-		for (const line of body.split("\n")) lines.push(theme.fg("text", line));
+		if (item.type !== "toolCall") continue;
+		lines.push(`${theme.fg("muted", "→ ")}${theme.fg("text", item.name)}`);
 	}
 	return lines;
 }

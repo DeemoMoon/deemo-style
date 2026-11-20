@@ -87,14 +87,16 @@ export class ExtensionStatusText {
 	update(statuses: ReadonlyMap<string, string>): string {
 		const previous = this.entries;
 		let changed = previous.length !== statuses.size;
-		const entries: Array<[string, string]> = [];
 		let index = 0;
 		for (const [key, value] of statuses) {
-			entries.push([key, value]);
 			const old = previous[index++];
 			if (!changed && (old === undefined || old[0] !== key || old[1] !== value)) changed = true;
 		}
 		if (!changed) return this.text;
+
+		// 确认变化后才建新数组/元组：没变时每帧零分配。
+		const entries: Array<[string, string]> = [];
+		for (const [key, value] of statuses) entries.push([key, value]);
 
 		// 缓存基线保持"插入序"（下一次就按插入序比对），排序只作用于输出用的副本。
 		this.entries = entries;
@@ -545,12 +547,14 @@ export function shortenTail(text: string, maxWidth: number): string {
 /** 纯可打印 ASCII（每个码位 1 列）。 */
 export const ASCII_ONLY = /^[\x20-\x7e]*$/;
 
-/** resultOutput 的按对象缓存：同一 result（展开/收起、重复渲染）不重复清洗。 */
+/** resultOutput 的按对象缓存：key 用 content 数组（pi 每次 render 都会包一个
+ * 新对象，但 content 数组引用在多次渲染间稳定），同一结果不重复清洗。 */
 export const outputCache = new WeakMap<object, string>();
 
 /** 工具结果的文本输出（合并 text 部分 + 清洗）。 */
 export function resultOutput(result: { content: Array<{ type: string; text?: string }> }): string {
-	const cached = outputCache.get(result);
+	const cacheKey = result.content;
+	const cached = outputCache.get(cacheKey);
 	if (cached !== undefined) return cached;
 	const text = cleanText(
 		result.content
@@ -558,7 +562,7 @@ export function resultOutput(result: { content: Array<{ type: string; text?: str
 			.map((part) => part.text ?? "")
 			.join("\n"),
 	).trim();
-	outputCache.set(result, text);
+	outputCache.set(cacheKey, text);
 	return text;
 }
 
@@ -695,12 +699,3 @@ export function formatIndentedPreview(
 
 	return visibleLines;
 }
-
-/**
- * 按「宽度 + 额外缓存键」缓存渲染结果的基类。
- *
- * pi 的 ScrollView 每次 requestRender 都会整屏重渲染（不只是可视区），所以每个
- * 自绘组件都必须缓存；以前每个类各自抄一遍 cachedWidth/cachedLines/invalidate，
- * 这里收成一处。子类只实现 renderLines()，不需要自己截断——基类统一按宽度硬切，
- * 保证极窄终端下也不会向 pi 输出超宽行（pi 遇到超宽行会直接报错停掉 TUI）。
- */

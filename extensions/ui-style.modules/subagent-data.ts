@@ -55,8 +55,6 @@ export const ACCENT_SUBAGENT: Rgb = [95, 135, 215];
 export const RESULT_CONCLUSION_LINES = 4;
 /** 展开态每个子代理最多显示多少个 display item（过程）。 */
 export const RESULT_SINGLE_ITEMS = 10;
-/** text 型 item 折叠时最多显示几行。 */
-export const RESULT_TEXT_LINES = 3;
 
 // ---- 数据形状（本地最小形状，不依赖 pi 的类型） ----------------------------
 
@@ -205,19 +203,9 @@ export function childActivityText(messages: SubagentMessageLike[]): string {
 	return text;
 }
 
-/**
- * 块耗时文案：运行中的第一帧（0~几 ms）不显示。
- *
- * 计时口径是「块一出现就开始」，所以首帧 elapsed 必为 0ms；直接显示会闪一下
- * "0ms" 再跳到真实值。结束后照常显示（3ms 这种本机工具的真实耗时有意义）。
- */
-export function elapsedText(clock: BlockClock): string | undefined {
-	return liveClockText(clock);
-}
-
 /** 耗时后缀（` · ⏱ 2.4s`），没有可信计时时为空串。 */
 function timerSuffix(clock: BlockClock): string {
-	const elapsed = elapsedText(clock);
+	const elapsed = liveClockText(clock);
 	return elapsed === undefined ? "" : ` · ${ICON_TIMER} ${elapsed}`;
 }
 
@@ -265,12 +253,7 @@ export function childTitle(
 	running: boolean,
 ): string {
 	const mark = statusMark([child], running);
-	const plain = childTitlePlain(child, clock);
-	if (running) {
-		const full = `${plain} · ${statusMarkGlyph(mark)}`;
-		return `${BOLD_ON}${shimmerText(full, ACCENT_SUBAGENT, clock.startedAt)}${BOLD_OFF}${RESET_FG}`;
-	}
-	return `${sgr(ACCENT_SUBAGENT)}${BOLD_ON}${plain}${BOLD_OFF}${RESET_FG}${statusMarkText(mark)}`;
+	return titleWithMark(childTitlePlain(child, clock), mark, clock, running);
 }
 
 
@@ -337,22 +320,16 @@ export function statusMarkText(mark: StatusMark): string {
 	return ` · ${sgr(rgb)}${statusMarkGlyph(mark)}${RESET_FG}`;
 }
 
-/** 面板标题的纯文本部分（扫光要把整行当字符流处理，所以单独一份）。 */
-export function panelTitlePlain(
+/** 模式标题文案（renderCall 与面板标题共用，避免两处各写一份）。 */
+function modeLabel(
 	mode: SubagentDetailsLike["mode"],
-	results: readonly SubagentChildLike[],
-	clock: BlockClock,
+	count: number,
+	agent: string,
 ): string {
-	const label =
-		mode === "single"
-			? `子代理${results[0] ? ` · ${results[0].agent}` : ""}`
-			: mode === "parallel"
-				? `子代理 · 并行 · ${results.length} 个任务`
-				: `子代理 · 链式 · 共 ${results.length} 步`;
-	const icon = mode === "parallel" ? ICON_PARALLEL : ICON_SUBAGENT;
-	return `${icon} ${label}${timerSuffix(clock)}`;
+	if (mode === "single") return `子代理${agent ? ` · ${agent}` : ""}`;
+	if (mode === "parallel") return `子代理 · 并行 · ${count} 个任务`;
+	return `子代理 · 链式 · 共 ${count} 步`;
 }
-
 
 /** 标题 = 正文（运行中整行扫光）+ 行尾状态标记（标记不参与扫光）。 */
 function titleWithMark(plain: string, mark: StatusMark, clock: BlockClock, running: boolean): string {
@@ -382,12 +359,7 @@ export function titleFromArgs(
 	const chain = Array.isArray(record.chain) ? record.chain.length : 0;
 	const mode: SubagentDetailsLike["mode"] = tasks > 0 ? "parallel" : chain > 0 ? "chain" : "single";
 	const agent = typeof record.agent === "string" && record.agent ? record.agent : "";
-	const label =
-		mode === "single"
-			? `子代理${agent ? ` · ${agent}` : ""}`
-			: mode === "parallel"
-				? `子代理 · 并行 · ${tasks} 个任务`
-				: `子代理 · 链式 · 共 ${chain} 步`;
+	const label = modeLabel(mode, mode === "parallel" ? tasks : chain, agent);
 	const icon = mode === "parallel" ? ICON_PARALLEL : ICON_SUBAGENT;
 	const plain = `${icon} ${label}${timerSuffix(clock)}`;
 	const resolved = running ? statusMark([], true) : mark;

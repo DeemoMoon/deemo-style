@@ -107,9 +107,10 @@ export function addEntryStats(stats: SessionStats, entry: StatEntryLike): void {
 		const role = entry.message.role;
 		if (role === "assistant" || role === "toolResult") {
 			addUsage(stats, entry.message.usage as StatUsageLike | undefined);
+			stats.messageCount += 1;
+		} else if (role === "user") {
+			stats.turnCount += 1;
 		}
-		if (role === "assistant" || role === "toolResult") stats.messageCount += 1;
-		else if (role === "user") stats.turnCount += 1;
 		return;
 	}
 	if (entry.type === "branch_summary" || entry.type === "compaction") {
@@ -149,6 +150,8 @@ interface TurnTracker {
 	last: number;
 	turnStart: number;
 	turnEnd: number;
+	/** 最后一条 message 的角色：只有 user / toolResult 结尾才算“还在跑”。 */
+	lastRole?: string;
 }
 
 /** 单条条目进时间累计（与 usage 统计同一次遍历）。 */
@@ -159,6 +162,7 @@ function trackEntryTime(stats: SessionStats, tracker: TurnTracker, entry: StatEn
 		tracker.last = time;
 	}
 	if (entry.type !== "message") return;
+	tracker.lastRole = entry.message?.role;
 	if (entry.message?.role === "user") {
 		// 上一轮到这里收尾
 		if (tracker.turnStart > 0 && tracker.turnEnd >= tracker.turnStart) {
@@ -181,12 +185,14 @@ function finalizeStats(stats: SessionStats, tracker: TurnTracker, now: number): 
 			: undefined;
 
 	// 最后一轮还没被下一条用户消息收尾：
-	//   - 距最后一个条目很近（≤ ACTIVE_TAIL_MS）→ 当作还在生成，用"到现在"补；
-	//   - 早就过去了 → 这一轮其实已经结束（助手消息就是收尾），不要补，
-	//     否则"答完去泡杯咖啡"的时间会被算进累计用时。
+	//   - 最后一条是 user / toolResult（真正还在生成或跑工具）且距现在 ≤ ACTIVE_TAIL_MS
+	//     → 用 "到现在" 补；
+	//   - 最后一条是 assistant（本轮已给出答案）时不再补，否则“答完去泡杯咖啡”
+	//     的 2 分钟会被算进累计用时。
 	if (tracker.turnStart > 0 && tracker.turnEnd >= tracker.turnStart) {
+		const openTurn = tracker.lastRole === "user" || tracker.lastRole === "toolResult";
 		const gap = now - tracker.turnEnd;
-		const tail = gap > 0 && gap <= ACTIVE_TAIL_MS ? gap : 0;
+		const tail = openTurn && gap > 0 && gap <= ACTIVE_TAIL_MS ? gap : 0;
 		stats.activeMs += tracker.turnEnd - tracker.turnStart + tail;
 	}
 	stats.wallMs = tracker.first > 0 && tracker.last >= tracker.first ? tracker.last - tracker.first : 0;

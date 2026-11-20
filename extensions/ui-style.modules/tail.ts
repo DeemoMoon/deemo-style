@@ -269,9 +269,12 @@ export class LiveTailView extends CachedView {
 		const text = this.snapshot(this.source.text(), this.source.finished());
 		const finished = this.source.finished();
 		const indent = this.options.indent ?? "";
+		// 光标要占 1 列：不预留的话，满宽的最后一行会被 CachedView 截成 "…"，
+		// 正好把最新的一个字和光标一起吃掉。
+		const reserveCursor = !finished && this.options.cursor !== false ? 1 : 0;
 		const contentWidth = Math.max(
 			1,
-			width - UI_INDENT_WIDTH - indent.length - PREVIEW_CONNECTOR_WIDTH,
+			width - UI_INDENT_WIDTH - indent.length - PREVIEW_CONNECTOR_WIDTH - reserveCursor,
 		);
 		const { rows, more } = tailWindow(
 			text,

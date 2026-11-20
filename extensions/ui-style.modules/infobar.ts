@@ -20,6 +20,7 @@ import {
 	CHROME_LEFT_PAD,
 	chromeLine,
 	contextUsageCached,
+	ANIMATION_TICK_MS,
 	formatDuration,
 	formatPanelDuration,
 	formatTokens,
@@ -185,7 +186,7 @@ function estimateContentChars(content: string | ThinkingContentLike[] | undefine
 
 /** 速度档：≤60 天青 / 61~150 黄 / ≥151 红（未如速度也算最低档）。 */
 export function speedTier(speed: number | undefined): SpeedTier {
-	const value = speed ?? 0;
+	const value = speed !== undefined && Number.isFinite(speed) ? speed : 0;
 	for (const tier of SPEED_TIERS) if (value <= tier.max) return tier;
 	return SPEED_TIERS[SPEED_TIERS.length - 1]!;
 }
@@ -200,7 +201,7 @@ export interface SpeedFrame {
 	breathMs: number;
 }
 
-/** 档位基色 × 亮度（向黑色混合，保持色相）。 */
+/** 档位基色 × 亮度：0 时保留基色的 30%，1 时回到原色（实际区间约 61.5%~100%）。 */
 function tint(rgb: Rgb, intensity: number): string {
 	return sgr(mixRgb(mixRgb(rgb, BLACK, 0.7), rgb, intensity));
 }
@@ -281,8 +282,7 @@ class InfoBarWidget implements Component {
 		return last;
 	}
 
-	private currentSpeed(): string {
-		const speed = this.speedValue();
+	private currentSpeed(speed: number | undefined): string {
 		return speed !== undefined ? speed.toFixed(1) : "--";
 	}
 
@@ -320,7 +320,7 @@ class InfoBarWidget implements Component {
 		const parts = [
 			`${INFO_ICON_IN} ${this.inputText()} ${TOKEN_UNIT}`,
 			`${INFO_ICON_OUT} ${hasOutput ? formatTokens(outputTotal) : "--"} ${TOKEN_UNIT}`,
-			`${speedPart}${this.currentSpeed()} ${SPEED_UNIT}`,
+			`${speedPart}${this.currentSpeed(speed)} ${SPEED_UNIT}`,
 			`${INFO_ICON_LATENCY} ${this.ttftText()}`,
 			// 同理：沙漏后面那个空格也在染色范围内
 			`${HOURGLASS_COLOR}${hourglass} ${RESET_FG}${this.currentElapsed()}`,
@@ -394,8 +394,11 @@ export function setupInfoBar(pi: ExtensionAPI): void {
 	const startLiveUpdates = () => {
 		if (unsubscribeTick) return;
 		unsubscribeTick = subscribeAnimationTick("input-info-bar", () => {
-			// 显示值没变就不请求整屏重渲染（pi 的 ScrollView 无视口裁剪，一次就是一帧）
-			const snapshot = `${Math.round(tps.outputTokens)}|${Math.floor(((task.running ? Date.now() : (task.endedAt ?? 0)) - (task.startedAt ?? 0)) / 1000)}`;
+			// 显示值没变就不请求整屏重渲染（pi 的 ScrollView 无视口裁剪，一次就是一帧）。
+			// 时间槽按统一节拍（100ms）而不是 1s：沙漏/呼吸/秒表都要求 ~10fps，
+			// 用整秒会让动画在无 token 增长时掉到 1fps。
+			const elapsed = (task.running ? Date.now() : (task.endedAt ?? 0)) - (task.startedAt ?? 0);
+			const snapshot = `${Math.round(tps.outputTokens)}|${Math.floor(elapsed / ANIMATION_TICK_MS)}`;
 			if (snapshot === lastTickSnapshot) return;
 			lastTickSnapshot = snapshot;
 			tui?.requestRender();

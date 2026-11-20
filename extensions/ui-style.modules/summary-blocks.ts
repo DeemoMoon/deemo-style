@@ -23,7 +23,6 @@
 
 import {
 	MouseRegion,
-	truncateToWidth,
 	wrapTextWithAnsi,
 	type Component,
 	type TuiMouseEvent,
@@ -47,6 +46,7 @@ import {
 	MUTED,
 	normalizeNewlines,
 	patchPrototypeSlots,
+	prototypeOriginal,
 	PREVIEW_CONNECTOR_FIRST,
 	PREVIEW_CONNECTOR_REST,
 	RESET_FG,
@@ -135,6 +135,7 @@ export function recordCompactionResult(
 export function resetCompactionTiming(): void {
 	lastCompaction = undefined;
 	compactionByEntryId.clear();
+	summaryTokensCache.clear();
 }
 
 /** 取这个块对应的本地记录（优先按 entry id，其次用最近一次）。 */
@@ -178,27 +179,27 @@ export function summaryTitle(options: {
  */
 export class SummaryBlockView extends CachedView {
 	private readonly title: string;
-	private readonly summary: string;
+	private readonly text: string;
 	private readonly expanded: boolean;
 	private readonly theme: ThemeLike;
 
 	constructor(title: string, summary: string, expanded: boolean, theme: ThemeLike = PLAIN_THEME) {
 		super();
 		this.title = title;
-		this.summary = summary;
+		this.text = normalizeNewlines(summary).trim();
 		this.expanded = expanded;
 		this.theme = theme;
 	}
 
 	protected override cacheKey(): string {
-		return `${this.expanded ? 1 : 0}\u0000${this.title}\u0000${this.summary.length}`;
+		return `${this.expanded ? 1 : 0}\u0000${this.title}\u0000${this.text.length}`;
 	}
 
 	protected renderLines(width: number): string[] {
 		const theme = this.theme;
 		const lines = [`${UI_INDENT}${this.title}`];
 		const contentWidth = Math.max(1, width - UI_INDENT.length - PREVIEW_CONNECTOR_REST.length);
-		const text = normalizeNewlines(this.summary).trim();
+		const text = this.text;
 		if (!text) {
 			lines.push(`${UI_INDENT}${PREVIEW_CONNECTOR_FIRST}${theme.fg("muted", "(空摘要)")}`);
 			return lines;
@@ -227,9 +228,10 @@ export class SummaryBlockView extends CachedView {
 			}
 		}
 		if (head.remaining > 0) {
-			lines.push(
-				`${UI_INDENT}${PREVIEW_CONNECTOR_REST}${theme.fg("muted", `... 还有 ${head.remaining} 行（Ctrl+O 展开）`)}`,
-			);
+			const hint = theme.fg("muted", `... 还有 ${head.remaining} 行（Ctrl+O 展开）`);
+			for (const segment of wrapTextWithAnsi(hint, contentWidth)) {
+				lines.push(`${UI_INDENT}${PREVIEW_CONNECTOR_REST}${segment}`);
+			}
 		}
 		return lines;
 	}
@@ -241,6 +243,8 @@ interface SummaryPrototype {
 	message?: unknown;
 	/** pi 给每条会话条目分配的 id（用来对上本地测到的压缩结果）。 */
 	messageId?: string;
+	paddingX?: number;
+	bgFn?: (text: string) => string;
 	clear(): void;
 	addChild(component: Component): void;
 	setBgFn(bgFn?: (text: string) => string): void;
@@ -250,15 +254,24 @@ interface SummaryPrototype {
 	[key: `ui-style:${string}`]: unknown;
 }
 
+/** 摘要块实例的原 padding/bg：unpatch 时恢复，避免关闭扩展后残留 paddingX=0。 */
+const summaryOriginals = new Map<
+	SummaryPrototype,
+	{ paddingX: number; bgFn: ((text: string) => string) | undefined }
+>();
+
 /** 给「标题 + 5 行窗口」的组件打补丁（两个块共用）。 */
 function patchSummaryComponent(
 	proto: SummaryPrototype,
 	prefix: string,
 	buildTitle: (message: SummaryMessageLike, messageId: string | undefined) => string,
 ): void {
-	const originalUpdateDisplay = proto.updateDisplay;
+	const originalUpdateDisplay = prototypeOriginal(proto, prefix, "updateDisplay");
 	const patched = function (this: SummaryPrototype): void {
 		try {
+			if (!summaryOriginals.has(this)) {
+				summaryOriginals.set(this, { paddingX: this.paddingX ?? 0, bgFn: this.bgFn });
+			}
 			// 去掉 pi 的背景色与内边距：缩进由我们自己的 UI_INDENT 统一给。
 			this.setPaddingX(0);
 			this.setBgFn(undefined);
@@ -274,7 +287,11 @@ function patchSummaryComponent(
 					) as unknown as Component,
 					(event: TuiMouseEvent): TuiMouseEventResult | undefined => {
 						if (event.type !== "click" || event.button !== "left") return undefined;
-						this.setExpanded(!this.expanded);
+						try {
+							this.setExpanded(!this.expanded);
+						} catch {
+							// pi 改内部结构时不要让鼠标回调打断输入循环。
+						}
 						return { handled: true };
 					},
 				),
@@ -322,7 +339,7 @@ export function compactionTitle(
  * 摘要的 token 数（带缓存）。
  *
  * 长摘要的 `estimateTokens` 是 O(文本长度)，而标题每次 "重建组件"都会算一遍；
- * 用「长度 + 首尾各 32 字」当指纹缓存，内容变了自然失效。
+ * 用完整摘要文本当 key（只留长度+首尾会在同长度内容上撞车，显示错误的 token 数）。
  * 注意：pi-ai 的 `estimateTokens` 对 assistant **只认 block 数组**的 content
  * （传字符串会得到 0），这里显式包成 text 块。
  */
@@ -331,14 +348,15 @@ const summaryTokensCache = new Map<string, number>();
 export function summaryTokens(summary: string): number | undefined {
 	const text = summary.trim();
 	if (!text) return undefined;
-	const key = `${text.length}:${text.slice(0, 32)}:${text.slice(-32)}`;
+	const key = text;
 	const cached = summaryTokensCache.get(key);
 	if (cached !== undefined) return cached;
 	const value = estimateTokens({
 		role: "assistant",
 		content: [{ type: "text", text }],
 	} as never);
-	if (summaryTokensCache.size < 64) summaryTokensCache.set(key, value);
+	if (summaryTokensCache.size >= 64) summaryTokensCache.clear();
+	summaryTokensCache.set(key, value);
 	return value;
 }
 
@@ -393,6 +411,17 @@ export function unpatchSummaryBlocks(): void {
 		"ui-style:branch-summary",
 		["updateDisplay"],
 	);
+	// 恢复实例上被永久改写的 paddingX / bgFn，再让原生 updateDisplay 重建一次。
+	for (const [instance, original] of summaryOriginals) {
+		try {
+			instance.setPaddingX(original.paddingX);
+			instance.setBgFn(original.bgFn);
+			instance.updateDisplay();
+		} catch {
+			// 实例可能已卸载：忽略。
+		}
+	}
+	summaryOriginals.clear();
 }
 
 // ---- 压缩中：同款标题 + 5 行窗口（显示"正在被压缩的原文"） ------------------
@@ -433,19 +462,21 @@ export function textsFromPreparation(preparation: unknown): string {
  */
 export class CompactionIndicatorView extends CachedView {
 	private readonly clock: BlockClock;
-	private readonly source: string;
+	/** 原文在构造时只拆一次；render 每 100ms 跑一次，不能再对几百 KB 做 normalize/split。 */
+	private readonly sourceLines: readonly string[];
 	private readonly reason: CompactionReason | undefined;
 
 	constructor(clock: BlockClock, source = "", reason: CompactionReason | undefined = undefined) {
 		super();
 		this.clock = clock;
-		this.source = source;
+		const text = normalizeNewlines(source).trim();
+		this.sourceLines = text === "" ? [] : text.split("\n");
 		this.reason = reason;
 	}
 
 	protected override cacheKey(): string {
 		// 扫光与耗时按 100ms 粒度变化；压缩期间 pi 的 spinner 会持续给帧。
-		return `${this.clock.startedAt ?? 0}:${Math.floor(Date.now() / 100)}:${this.source.length}:${this.reason ?? ""}`;
+		return `${this.clock.startedAt ?? 0}:${Math.floor(Date.now() / 100)}:${this.sourceLines.length}:${this.reason ?? ""}`;
 	}
 
 	protected renderLines(width: number): string[] {
@@ -461,14 +492,13 @@ export class CompactionIndicatorView extends CachedView {
 		const lines = [`${UI_INDENT}${title}`];
 
 		const contentWidth = Math.max(1, width - UI_INDENT.length - PREVIEW_CONNECTOR_REST.length);
-		const text = normalizeNewlines(this.source).trim();
-		if (!text) {
+		const sourceLines = this.sourceLines;
+		if (sourceLines.length === 0) {
 			lines.push(`${UI_INDENT}${PREVIEW_CONNECTOR_FIRST}${WARN_YELLOW}正在生成摘要…${RESET_FG}`);
-			return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
+			return lines;
 		}
 
 		// 原文是静态的（一次给全），但窗口按时间**自动下滚**：观感上像流式输出。
-		const sourceLines = text.split("\n");
 		const maxOffset = Math.max(0, sourceLines.length - SUMMARY_WINDOW_LINES);
 		const elapsed = this.clock.startedAt === undefined ? 0 : Date.now() - this.clock.startedAt;
 		const offset = Math.min(maxOffset, Math.floor(Math.max(0, elapsed) / SUMMARY_SCROLL_MS));
@@ -489,7 +519,7 @@ export class CompactionIndicatorView extends CachedView {
 		if (below > 0) {
 			lines.push(`${UI_INDENT}${PREVIEW_CONNECTOR_REST}${MUTED}… 下面还有 ${below} 行${RESET_FG}`);
 		}
-		return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
+		return lines;
 	}
 }
 

@@ -884,6 +884,8 @@ test("工具框：运行中/完成都显示 3 行尾窗，展开后看全部", (
 
 		// 完成 + 收起：显示尾部 3 行（或更少），不再是 0 行
 		const doneCtx = panelContext({ args });
+		// 真实流程会先 renderCall（write 在这里把 args.content 存进 state）
+		panel.renderCall(args, theme, doneCtx);
 		panel.renderResult(result, { expanded: false, isPartial: false }, theme, doneCtx);
 		const doneLines = panel
 			.renderResult(result, { expanded: false, isPartial: false }, theme, doneCtx)
@@ -949,6 +951,42 @@ test("运行中实时尾窗：只显示最新 3 行、末行带光标", () => {
 	} finally {
 		Date.now = realNow;
 	}
+});
+
+test("工具面板：历史回放优先使用 durationMs（不能显示 0ms）", () => {
+	const panel = resolvePanel("bash", () => undefined);
+	const args = { command: "echo hi" };
+	const realNow = Date.now;
+	try {
+		Date.now = () => 10_000;
+		const ctx = panelContext({ args, isPartial: true });
+		panel.renderCall(args, theme, ctx);
+		// pi 回放：构造时 isPartial=true 先计时，紧接着 updateResult 把它置为结束态。
+		Date.now = () => 10_001;
+		ctx.isPartial = false;
+		ctx.durationMs = 1234;
+		const line = strip(panel.renderCall(args, theme, ctx).render(80)[0] ?? "");
+		assert.match(line, /1\.2s/, `应使用 pi 持久化的 durationMs：${line}`);
+		assert.doesNotMatch(line, /\b0ms\b/, `不能显示回放的一帧耗时：${line}`);
+	} finally {
+		Date.now = realNow;
+	}
+});
+
+test("实时尾窗：满宽末行仍保留光标（不能被 truncate 换成 …）", () => {
+	const panel = resolvePanel("bash", () => undefined);
+	const args = { command: "echo" };
+	const long = "中".repeat(120);
+	const ctx = panelContext({ args, isPartial: true });
+	const view = panel.renderResult(
+		{ content: [{ type: "text", text: long }] },
+		{ expanded: false, isPartial: true },
+		theme,
+		ctx,
+	);
+	const lines = view.render(40);
+	assert.ok(lines.join("").includes("▍"), "末行光标不应被截掉");
+	for (const line of lines) assert.ok(visibleWidth(line) <= 40, `超宽：${visibleWidth(line)}`);
 });
 
 test("完成后标题带行数（· N 行），点开仍能看全部", () => {
@@ -1242,15 +1280,15 @@ test("会话信息面板：内容 / 边框宽度 / 关闭 / 刷新", async () =>
 	assert.ok(out.startsWith("╭─ 会话信息"), "顶边缺失");
 	assert.ok(out.trimEnd().endsWith("╯"), "底边缺失");
 
-	// Esc 关闭
-	panel.handleInput("\x1b");
-	assert.equal(doneCalls, 1, "Esc 应关闭弹窗");
-
 	// r 刷新：改一条时间戳后，会话总时长应跟着变
 	entries[3].timestamp = "2026-11-15T10:05:30.000Z";
 	panel.handleInput("r");
 	const after = render().join("\n");
 	assert.ok(after.includes("5 m 30 s"), `刷新后总时长应为 10:00:00 → 10:05:30：\n${after}`);
+
+	// Esc 关闭
+	panel.handleInput("\x1b");
+	assert.equal(doneCalls, 1, "Esc 应关闭弹窗");
 });
 
 test("会话信息面板：Tab 切焦点、←→ 改模型/思考、Enter 改名", async () => {
@@ -1694,7 +1732,7 @@ test("信息面板：切模型过程中不打断底边框（不闪烁/无中间�
 	assert.ok(!after.includes("…"), "底边框不应出现占位省略号");
 });
 
-test("启动资源：promptOptions 空数组是权威结果；force 会重扫技能", async () => {
+test("启动资源：扫描技能；force 会重扫技能", async () => {
 	const startup = await jiti.import(fileURLToPath(new URL("../startup.ts", import.meta.url)));
 	const dir = mkdtempSync(join(tmpdir(), "ui-style-res-"));
 	mkdirSync(join(dir, ".agents", "skills", "foo"), { recursive: true });
@@ -1702,21 +1740,16 @@ test("启动资源：promptOptions 空数组是权威结果；force 会重扫技
 	mkdirSync(join(dir, ".agents", "skills", "bar"), { recursive: true });
 	writeFileSync(join(dir, ".agents", "skills", "bar", "SKILL.md"), "# bar\n");
 
-	// promptOptions 明确给出空 skills：不能再回退到扫描，foo/bar 都不应出现
-	const promptCtx = { getSystemPromptOptions: () => ({ contextFiles: [], skills: [] }) };
-	const empty = await startup.collectSessionResources(dir, promptCtx, [], { force: true });
-	assert.deepEqual(empty.skills, []);
-
-	// 没有 promptOptions：扫描应看到 foo + bar
-	const scanned = await startup.collectSessionResources(dir, undefined, [], { force: true });
+	// 扫描应看到 foo + bar
+	const scanned = await startup.collectSessionResources(dir, [], { force: true });
 	assert.ok(scanned.skills.includes("foo") && scanned.skills.includes("bar"), scanned.skills.join(","));
 
 	// 新增技能后，不带 force 仍读缓存；带 force 才重扫
 	mkdirSync(join(dir, ".agents", "skills", "baz"), { recursive: true });
 	writeFileSync(join(dir, ".agents", "skills", "baz", "SKILL.md"), "# baz\n");
-	const cached = await startup.collectSessionResources(dir, undefined, []);
+	const cached = await startup.collectSessionResources(dir, []);
 	assert.ok(!cached.skills.includes("baz"), `不该读到新技能：${cached.skills.join(",")}`);
-	const forced = await startup.collectSessionResources(dir, undefined, [], { force: true });
+	const forced = await startup.collectSessionResources(dir, [], { force: true });
 	assert.ok(forced.skills.includes("baz"), `force 后应读到新技能：${forced.skills.join(",")}`);
 });
 

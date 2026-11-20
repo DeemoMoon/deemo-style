@@ -57,6 +57,20 @@ export function shouldJumpToReplyStart(input: {
 	return input.renderedLines >= need;
 }
 
+/**
+ * 找本条回复首行时该往哪个方向扫。
+ *
+ * `scrollToPrompt(-1)` 从 `scrollTop - 1` 向上找；如果回复首行仍在视口内
+ * （renderedLines < viewportHeight），它就在当前 `scrollTop` 下面，必须向下找，
+ * 否则会命中上一条用户消息。回复高于视口时首行在视口上方，仍用 -1。
+ */
+export function replyStartScrollDirection(
+	renderedLines: number,
+	viewportHeight: number,
+): -1 | 1 {
+	return viewportHeight > 0 && renderedLines < viewportHeight ? 1 : -1;
+}
+
 /** 视口高度（取不到就返回 0，由 shouldJumpToReplyStart 走兜底阈值）。 */
 function viewportHeightOf(bridge: ScrollBridge): number {
 	try {
@@ -89,18 +103,21 @@ export function setupJumpToReplyStart(pi: ExtensionAPI): void {
 		// regular 模式没有 scroll view：没有 isFollowingOutput 就直接跳过
 		if (typeof bridge.isFollowingOutput !== "boolean") return;
 		if (typeof bridge.scrollToPrompt !== "function") return;
+		const viewportHeight = viewportHeightOf(bridge);
+		const renderedLines = lastAssistantRenderLines();
 		if (
 			!shouldJumpToReplyStart({
 				following: bridge.isFollowingOutput,
-				viewportHeight: viewportHeightOf(bridge),
-				renderedLines: lastAssistantRenderLines(),
+				viewportHeight,
+				renderedLines,
 			})
 		) {
 			return;
 		}
 		try {
-			// -1 = 往上找最近的 OSC133;A（就是这条回复的第一行）
-			bridge.scrollToPrompt(-1);
+			// 首行在视口上方 → -1；首行还在视口内（70%~100%）→ +1，
+			// 否则 -1 会越过它命中上一条用户消息。
+			bridge.scrollToPrompt(replyStartScrollDirection(renderedLines, viewportHeight));
 		} catch {
 			// pi 内部结构变了就静默放弃，不影响会话
 		}

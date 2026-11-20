@@ -16,6 +16,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
 	CustomEditor,
+	keyText,
 } from "@earendil-works/pi-coding-agent";
 import {
 	BOLD_OFF,
@@ -24,6 +25,7 @@ import {
 	CORAL,
 	getActiveCompactionReason,
 	mixRgb,
+	MUTED,
 	RESET_FG,
 	sgr,
 	SKY_BLUE,
@@ -162,7 +164,7 @@ export function patchSummaryStatusIndicators(): void {
 			const elapsed = Date.now() - (this.__uiStyleStart ?? Date.now());
 			// 输入框里的指示**只保留月相 + 呼吸文案**（不带时钟/耗时）：这一行紧贴输入框，
 			// 数字跳动会干扰打字；耗时由压缩块标题负责展示。
-			this.message = workingMessage(elapsed, text);
+			this.message = `${workingMessage(elapsed, text)} ${MUTED}(${keyText("app.interrupt")} 取消)${RESET_FG}`;
 		}
 		originalUpdateDisplay.call(this);
 	};
@@ -185,6 +187,8 @@ class RoundedEditor extends CustomEditor {
 	private readonly neutralBorder: (text: string) => string;
 	/** bash 模式（! 开头）仍保留单独的颜色。 */
 	private readonly paintBash: (text: string) => string;
+	/** 本次 render 已经算过的首个非空白字符（borderColor/prompt/firstContentLine 共用）。 */
+	private renderLead: string | undefined;
 
 	constructor(
 		tui: TUI,
@@ -236,6 +240,10 @@ class RoundedEditor extends CustomEditor {
 	 * 先 join 再复制一遍，而 render 每帧会问一次、borderColor 和 prompt 又各问一次。
 	 */
 	private leadingChar(): string {
+		return this.renderLead ?? this.computeLeadingChar();
+	}
+
+	private computeLeadingChar(): string {
 		const lines = (this as unknown as { state?: { lines?: string[] } }).state?.lines;
 		if (Array.isArray(lines)) {
 			for (const line of lines) {
@@ -265,6 +273,8 @@ class RoundedEditor extends CustomEditor {
 	}
 
 	override render(width: number): string[] {
+		// 每帧只扫一遍输入：borderColor（2 次）、prompt、firstContentLine 都读缓存。
+		this.renderLead = this.computeLeadingChar();
 		if (width < 8) return super.render(width);
 
 		const inner = super.render(width - BORDER_INSET * 2);
@@ -296,6 +306,8 @@ class RoundedEditor extends CustomEditor {
 		// render 给每行加了左右边框（内容整体右移 1 列），并且是用 width-2 调 super.render：
 		// 传给 Editor 的坐标必须同步回“无边框”的空间，否则点正文会偏右一列、
 		// 自动补全列表里的点击也会偏移，窄屏下 padding 上限还会算错。
+		// 极窄终端下 render 不加框，这里也必须保持一致。
+		if (event.width < 8) return super.handleMouse(event);
 		return super.handleMouse({
 			...event,
 			x: Math.max(0, event.x - BORDER_INSET),
@@ -339,6 +351,15 @@ export function setupRoundedEditor(pi: ExtensionAPI): void {
 		patchSummaryStatusIndicators();
 		stopBreathing();
 		applyWorkingStyle(ctx);
+		// 生成/压缩中途切会话（/new、/fork、resize 重绑）不能把呼吸停在第 0 帧。
+		// 测试桩 / 老版本 pi 的 ctx 可能没有 isIdle：拿不到就按空闲处理。
+		let active = false;
+		try {
+			active = typeof ctx.isIdle === "function" && !ctx.isIdle();
+		} catch {
+			active = false;
+		}
+		if (active) startBreathing(ctx);
 		ctx.ui.setEditorComponent((tui, theme, keybindings) =>
 			new RoundedEditor(
 				tui,

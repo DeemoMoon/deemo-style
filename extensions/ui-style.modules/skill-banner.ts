@@ -25,6 +25,7 @@ import {
 	MUTED,
 	patchPrototypeSlots,
 	PREVIEW_CONNECTOR_GAP,
+	prototypeOriginal,
 	RESET_FG,
 	sgr,
 	SKILL_PREVIEW_LINES,
@@ -68,6 +69,15 @@ function skillHeader(name: string): string {
 	);
 }
 
+/** 去掉 pi 固定加在技能内容开头的样板话，避免 4 行预览里 2 行是废话。 */
+function stripSkillBoilerplate(body: string): string {
+	const lines = body.split("\n");
+	if (lines[0]?.startsWith("References are relative to ") && (lines[1] ?? "").trim() === "") {
+		return lines.slice(2).join("\n");
+	}
+	return body;
+}
+
 /**
  * 折叠态的横幅视图：第一行标题，随后用与思考块相同的 ⎿ 连接线
  * 显示技能内容的前 4 行，更多折叠进"点击展开"提示。
@@ -79,7 +89,7 @@ class SkillPreviewView extends CachedView {
 	constructor(name: string, body: string) {
 		super();
 		this.name = name;
-		this.body = body;
+		this.body = stripSkillBoilerplate(body);
 	}
 
 	protected renderLines(width: number): string[] {
@@ -116,9 +126,9 @@ class SkillPreviewView extends CachedView {
 
 export function patchSkillBanner(): void {
 	const proto = SkillInvocationMessageComponent.prototype as unknown as SkillBannerPrototype;
-	// 先捕获原方法：patchPrototypeSlots 内部会做一次恢复再重打（幂等）。
-	const originalUpdateDisplay = proto.updateDisplay;
-	const originalSetPaddingX = proto.setPaddingX;
+	// 从 original 槽位取 pi 的实现（避免 /reload 时把旧补丁当成 original）。
+	const originalUpdateDisplay = prototypeOriginal(proto, "ui-style:skill", "updateDisplay");
+	const originalSetPaddingX = prototypeOriginal(proto, "ui-style:skill", "setPaddingX");
 
 	// 强制缩进在每次重建时生效：pi 创建组件后不一定调用 setPaddingX，
 	// 只补丁方法不主动触发的话缩进不会生效。
@@ -127,16 +137,15 @@ export function patchSkillBanner(): void {
 	};
 
 	const patchedUpdateDisplay = function (this: SkillBannerPrototype): void {
-		this.setPaddingX(UI_INDENT_WIDTH);
-		originalUpdateDisplay.call(this);
-		// 去掉整条紫色背景（展开态同样生效）。
-		this.setBgFn(undefined);
-		// 展开态保留 pi 原样（[skill] 标签 + 完整 SKILL.md，仅无背景）。
-		if (this.expanded) return;
-
-		// 折叠态：重建为“图标 · 技能名 · 已加载 + ⎿ 4 行预览”。
-		// pi 改了内部结构时宁可退回原样，也不要把这块整个打没。
 		try {
+			this.setPaddingX(UI_INDENT_WIDTH);
+			originalUpdateDisplay.call(this);
+			// 去掉整条紫色背景（展开态同样生效）。
+			this.setBgFn(undefined);
+			// 展开态保留 pi 原样（[skill] 标签 + 完整 SKILL.md，仅无背景）。
+			if (this.expanded) return;
+
+			// 折叠态：重建为“图标 · 技能名 · 已加载 + ⎿ 4 行预览”。
 			const name = this.skillBlock.name ?? "";
 			const body = this.skillBlock.content ?? "";
 			this.clear();
@@ -145,14 +154,24 @@ export function patchSkillBanner(): void {
 					new SkillPreviewView(name, body) as unknown as Component,
 					(event: TuiMouseEvent): TuiMouseEventResult | undefined => {
 						if (event.type !== "click" || event.button !== "left") return undefined;
-						this.setExpanded(!this.expanded);
+						try {
+							this.setExpanded(!this.expanded);
+						} catch {
+							// pi 改内部结构时不要让鼠标回调打断输入循环
+						}
 						return { handled: true };
 					},
 				),
 			);
 		} catch {
+			// 前半段（setPaddingX / 原生 updateDisplay）也纳入回退：
+			// 宁可显示未定制的横幅，也不要把这块整个打没。
 			this.clear();
-			originalUpdateDisplay.call(this);
+			try {
+				originalUpdateDisplay.call(this);
+			} catch {
+				// 原生渲染也失败：保持空块，不把异常抛给渲染循环。
+			}
 		}
 	};
 	patchPrototypeSlots(proto, "ui-style:skill", {

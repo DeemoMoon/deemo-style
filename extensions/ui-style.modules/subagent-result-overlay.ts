@@ -22,12 +22,15 @@ import {
 	wrapTextWithAnsi,
 	type Component,
 	type TUI,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { BOLD_OFF, BOLD_ON, DIM_GRAY, ICON_CLOCK, MUTED, RESET_FG } from "./core.ts";
+import { BOLD_OFF, BOLD_ON, cleanText, DIM_GRAY, ICON_CLOCK, MUTED, RESET_FG } from "./core.ts";
 import {
 	ICON_SUBAGENT,
 	childFinalOutput,
+	failureText,
 	statusMark,
 	statusMarkText,
 } from "./subagent-data.ts";
@@ -63,6 +66,9 @@ export function captureOverlayUi(pi: ExtensionAPI): void {
 	});
 	pi.on?.("session_shutdown", () => {
 		overlayUi = undefined;
+		// pi 的 resetExtensionUI 移除 overlay 时不会调用 done()；不在这里复位，
+		// 下一次会话里点击子代理会永远打不开弹窗。
+		overlayOpen = false;
 	});
 }
 
@@ -190,6 +196,22 @@ export class ChildResultOverlay implements Component {
 		this.top = Math.max(0, this.top + steps * 3);
 	}
 
+	/**
+	 * fullscreen 下 pi-tui 会把鼠标/滚轮先派给 overlay 组件；只在
+	 * onTerminalInput 里处理的话，全屏模式滚轮会被 alt-screen 先吃掉。
+	 */
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type === "wheel") {
+			const delta = event.wheelDelta ?? 0;
+			if (delta !== 0) this.scrollBy(delta > 0 ? 1 : -1);
+			return { handled: true, focus: true };
+		}
+		if (event.type === "click" || event.type === "press") {
+			return { handled: true, focus: true };
+		}
+		return undefined;
+	}
+
 	handleInput(data: string): void {
 		if (isKeyRelease(data)) return;
 		if (isCloseKey(data)) {
@@ -207,7 +229,12 @@ export class ChildResultOverlay implements Component {
 
 	render(width: number): string[] {
 		const theme = this.theme;
-		const total = Math.max(8, Math.min(width, this.preferredWidth()));
+		// 极窄终端下连边框都放不下：退化成无边框正文，保证绝不输出超宽行。
+		if (width < 5) {
+			const maxWidth = Math.max(1, width);
+			return this.bodyLines(maxWidth + 4).map((line) => truncateToWidth(line, maxWidth, ""));
+		}
+		const total = Math.max(1, Math.min(width, this.preferredWidth()));
 		const inner = total - 4;
 		const border = DIM_GRAY;
 		const body = this.bodyLines(total);
@@ -280,11 +307,13 @@ export async function showChildResultOverlay(
 	overlayOpen = true;
 	const payload: OverlayPayload = {
 		title: childResultTitle(child, elapsed),
-		body: childResultText(child),
+		// 失败/中止时显示错误证据（与块里的失败信息一致），不要只显示空结论。
+		body: cleanText(failureText(child) ?? childResultText(child)),
 	};
 
 	let overlay: ChildResultOverlay | undefined;
-	await ui.custom(
+	try {
+		await ui.custom(
 		(tui: TUI, theme: Theme, _keybindings: unknown, done: () => void) => {
 			const terminal = (tui as unknown as { terminal?: { columns?: number; rows?: number } })
 				.terminal;
@@ -317,6 +346,8 @@ export async function showChildResultOverlay(
 				const wheel = wheelDirection(data);
 				if (wheel !== undefined) {
 					component?.scrollBy(wheel);
+					// 扩展级 input listener 的 consume 不会触发重绘，必须自己请求。
+					(tui as unknown as { requestRender?: () => void }).requestRender?.();
 					return { consume: true };
 				}
 				// 其它鼠标事件（点击/拖拽）：模态吞掉，别让下面 react。
@@ -329,6 +360,7 @@ export async function showChildResultOverlay(
 					return { consume: true };
 				}
 				component?.handleInput(data);
+				(tui as unknown as { requestRender?: () => void }).requestRender?.();
 				return { consume: true };
 			};
 			const uiWithInput = ui as unknown as {
@@ -357,4 +389,10 @@ export async function showChildResultOverlay(
 			}),
 		},
 	);
+	} catch (error) {
+		// ui.custom 抛错（overlay 不支持 / factory 失败）时释放守卫；
+		// 正常关闭由 done() 的 close() 释放。
+		overlayOpen = false;
+		throw error;
+	}
 }

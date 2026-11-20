@@ -13,6 +13,7 @@
 import { generateDiffString } from "@earendil-works/pi-coding-agent";
 import { readFile as readFileAsync, stat as statAsync } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	BAD_RED,
 	fg24,
@@ -129,8 +130,9 @@ export function applyPreviewEdits(
 		const needle = useFuzzy ? normalizeForFuzzyMatch(edit.oldText) : edit.oldText;
 		const index = base.indexOf(needle);
 		if (index === -1) return { error: `预览失败：edits[${i}] 未找到要替换的文本` };
-		// 判唯一只需从首个命中处继续找一次，不用从头再全量扫一遍。
-		if (base.indexOf(needle, index + 1) !== -1) {
+		// 与 pi 的 countOccurrences（split 计数）一致：只数不重叠命中。
+		// 用 index + 1 会把 "aaa" 里的 "aa" 数成两次，预览说“不唯一”、真实 edit 却成功。
+		if (base.indexOf(needle, index + needle.length) !== -1) {
 			return { error: `预览失败：edits[${i}] 匹配不唯一` };
 		}
 		matched.push({
@@ -168,11 +170,17 @@ export function colorizeDiffLine(line: string): string {
 	if (line.startsWith("@@")) return `${MUTED}${line}${RESET_FG}`;
 	return line;
 }
-/** 把 edit 的路径参数变成绝对路径（与 pi 一致：相对 cwd，支持 `~`）。 */
+/** 把 edit 的路径参数变成绝对路径（与 pi 的 resolveToCwd 同口径）。 */
 export function resolvePreviewPath(path: string, cwd: string): string {
-	if (path === "~") return HOME;
-	if (path.startsWith("~/") || path.startsWith("~\\")) return join(HOME, path.slice(2));
-	return resolve(cwd, path);
+	// pi 的 normalizePath：Unicode 空格归一、去掉 @ 前缀、支持 file://。
+	let normalized = path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/gu, " ");
+	if (normalized.startsWith("@")) normalized = normalized.slice(1);
+	if (normalized.startsWith("file://")) return fileURLToPath(normalized);
+	if (normalized === "~") return HOME;
+	if (normalized.startsWith("~/") || normalized.startsWith("~\\")) {
+		return join(HOME, normalized.slice(2));
+	}
+	return resolve(cwd, normalized);
 }
 
 /**

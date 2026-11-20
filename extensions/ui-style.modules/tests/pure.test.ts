@@ -34,6 +34,7 @@ import {
 	shimmerText,
 	shortenTail,
 	shortenHome,
+	stripHomePrefix,
 	stripAnsi,
 	stripBom,
 	tailVisualRows,
@@ -68,7 +69,9 @@ import {
 	applyPreviewEdits,
 	getPreviewInput,
 	normalizeForFuzzyMatch,
+	resolvePreviewPath,
 } from "../edit-preview.ts";
+import { replyStartScrollDirection } from "../reading.ts";
 import { supportedThinkingLevels } from "../levels.ts";
 import { stripBackgroundSgr } from "../assistant.ts";
 
@@ -125,6 +128,8 @@ test("shortenHome：home 边界不能被误缩写", () => {
 	assert.equal(shortenHome(`${home}/a/b`), "~/a/b");
 	// home 前缀但下一字符不是分隔符：保持原样
 	assert.equal(shortenHome(`${home}2x`), `${home}2x`);
+	// Windows 盘符根不能退化成 "C:"（否则整盘都会被当成 home）
+	assert.equal(stripHomePrefix("C:\\Windows", "C:\\", true), "Windows");
 });
 
 test("shortenTail：ASCII 快路径与宽字符都收在宽度内", () => {
@@ -352,17 +357,23 @@ test("computeSessionStats：没有缓存读写时命中率为 undefined（不误
 	assert.equal(stats.totalTokens, 15);
 });
 
-test("computeSessionStats：末轮只在最近 2 分钟内补增长（离开去泡咖啡不算用时）", () => {
-	const entries = [
+test("computeSessionStats：assistant 收尾后不补尾；user/toolResult 收尾才补", () => {
+	const finished = [
 		{ type: "message", timestamp: "2026-01-01T00:00:00.000Z", message: { role: "user" } },
 		{ type: "message", timestamp: "2026-01-01T00:00:10.000Z", message: { role: "assistant" } },
 	];
-	// 距最后条目 110s（≤120s）：当作还在生成，补上
-	const live = computeSessionStats(entries, Date.parse("2026-01-01T00:02:00.000Z"));
-	assert.equal(live.activeMs, 10_000 + 110_000);
-	// 早就过去了：这一轮已经结束，不补
-	const idle = computeSessionStats(entries, Date.parse("2026-01-01T03:00:00.000Z"));
+	// 最后一条是 assistant：本轮已给出答案，读屏/离开的时间不能算进 activeMs。
+	const idle = computeSessionStats(finished, Date.parse("2026-01-01T00:02:00.000Z"));
 	assert.equal(idle.activeMs, 10_000);
+
+	// 最后一条是 toolResult：agent 还在跑，距现在 110s（≤120s）时补上。
+	const running = [...finished, {
+		type: "message",
+		timestamp: "2026-01-01T00:00:20.000Z",
+		message: { role: "toolResult" },
+	}];
+	const live = computeSessionStats(running, Date.parse("2026-01-01T00:02:10.000Z"));
+	assert.equal(live.activeMs, 20_000 + 110_000);
 });
 
 test("renderContextBar：格子数正确、档位阈值一致（状态栏与面板共用）", () => {
@@ -381,8 +392,8 @@ test("renderContextBar：格子数正确、档位阈值一致（状态栏与面�
 
 test("panelViewport / clampScroll：窗口按终端行数封顶，滚动不越界", () => {
 	assert.equal(panelViewport(40, 10), 10);
-	assert.equal(panelViewport(40, 100), 37);
-	assert.equal(panelViewport(6, 100), 5);
+	assert.equal(panelViewport(40, 100), 36);
+	assert.equal(panelViewport(6, 100), 2);
 	assert.equal(clampScroll(-5, 20, 10), 0);
 	assert.equal(clampScroll(999, 20, 10), 10);
 	assert.equal(clampScroll(3, 5, 10), 0);
@@ -628,6 +639,11 @@ test("edit-preview：与 pi edit 同语义（多编辑/fuzzy/唯一命中/重叠
 	const duplicate = applyPreviewEdits("aa", [{ oldText: "a", newText: "b" }]);
 	assert.ok("error" in duplicate && duplicate.error.includes("不唯一"), JSON.stringify(duplicate));
 
+	// 自重叠 needle 与 pi 的 split 计数一致（"aaa" 里的 "aa" 只算一次）
+	const selfOverlap = applyPreviewEdits("aaa", [{ oldText: "aa", newText: "b" }]);
+	assert.ok(!("error" in selfOverlap), JSON.stringify(selfOverlap));
+	assert.equal(selfOverlap.content, "ba");
+
 	const overlap = applyPreviewEdits("abcd", [
 		{ oldText: "abc", newText: "x" },
 		{ oldText: "bcd", newText: "y" },
@@ -636,6 +652,17 @@ test("edit-preview：与 pi edit 同语义（多编辑/fuzzy/唯一命中/重叠
 
 	const empty = applyPreviewEdits("abc", [{ oldText: "", newText: "x" }]);
 	assert.ok("error" in empty && empty.error.includes("为空"), JSON.stringify(empty));
+
+	// 路径归一：与 pi 的 resolveToCwd 一样支持 @ 前缀、Unicode 空格、file://
+	assert.equal(resolvePreviewPath("@src/a.ts", "/proj"), "/proj/src/a.ts");
+	assert.equal(resolvePreviewPath("a\u00A0b.ts", "/proj"), "/proj/a b.ts");
+	assert.equal(resolvePreviewPath("file:///tmp/x.ts", "/proj"), "/tmp/x.ts");
+});
+
+test("阅读辅助：回复首行在视口内时向下扫，高于视口时向上扫", () => {
+	assert.equal(replyStartScrollDirection(30, 20), -1);
+	assert.equal(replyStartScrollDirection(10, 20), 1);
+	assert.equal(replyStartScrollDirection(20, 20), -1);
 });
 
 test("#5 stripBackgroundSgr：47 / 100 / 48;2 与非法 mode", () => {

@@ -101,9 +101,24 @@ interface SettingsPair {
 /** 路径类型；不存在或不可访问时为 undefined。 */
 type PathKind = "file" | "dir";
 
+/** 全局 fs 并发闸门：递归扫描每层都开 8 个 worker，必须再有一道总量上限。 */
+const MAX_CONCURRENT_FS = 32;
+let activeFs = 0;
+const fsWaiters: Array<() => void> = [];
+async function withFsSlot<T>(fn: () => Promise<T>): Promise<T> {
+	if (activeFs >= MAX_CONCURRENT_FS) await new Promise<void>((resolve) => fsWaiters.push(resolve));
+	activeFs += 1;
+	try {
+		return await fn();
+	} finally {
+		activeFs -= 1;
+		fsWaiters.shift()?.();
+	}
+}
+
 async function statKindAsync(path: string): Promise<PathKind | undefined> {
 	try {
-		const stats = await stat(path);
+		const stats = await withFsSlot(() => stat(path));
 		if (stats.isFile()) return "file";
 		if (stats.isDirectory()) return "dir";
 	} catch {
@@ -126,11 +141,30 @@ async function entryKind(entry: Dirent, full: string): Promise<PathKind | undefi
 /** 读目录（跳过隐藏项与 node_modules，与 pi 的发现规则一致）；读不到返回 []。 */
 async function readEntries(dir: string): Promise<Dirent[]> {
 	try {
-		const entries = await readdir(dir, { withFileTypes: true });
+		const entries = await withFsSlot(() => readdir(dir, { withFileTypes: true }));
 		return entries.filter((entry) => !entry.name.startsWith(".") && entry.name !== "node_modules");
 	} catch {
 		return [];
 	}
+}
+
+/** 有并发上限的 map：避免大目录树 / 多 root 时瞬间发出上千个 stat。 */
+async function mapLimit<T, R>(
+	items: readonly T[],
+	limit: number,
+	fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+	const results = new Array<R>(items.length);
+	let next = 0;
+	const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+		while (true) {
+			const index = next++;
+			if (index >= items.length) return;
+			results[index] = await fn(items[index]!, index);
+		}
+	});
+	await Promise.all(workers);
+	return results;
 }
 
 /** 读文本文件（顺带去掉 BOM）；读不到返回 undefined。 */
@@ -146,7 +180,13 @@ async function readTextFile(path: string): Promise<string | undefined> {
 /** pi 的用户级配置目录：优先 PI_CODING_AGENT_DIR。 */
 function agentDir(): string {
 	const fromEnv = process.env.PI_CODING_AGENT_DIR?.trim();
-	return fromEnv && fromEnv.length > 0 ? fromEnv : join(HOME, ".pi", "agent");
+	if (!fromEnv) return join(HOME, ".pi", "agent");
+	// `~` 不是 join 能展开的；否则 PI_CODING_AGENT_DIR=~/x 会去找字面量 "~/x"。
+	if (fromEnv === "~") return HOME;
+	if (fromEnv.startsWith("~/") || fromEnv.startsWith("~\\")) {
+		return join(HOME, fromEnv.slice(2));
+	}
+	return fromEnv;
 }
 
 function normalizeSlashes(value: string): string {
@@ -215,11 +255,12 @@ function wildcardRegExp(pattern: string): RegExp {
 
 	const escaped = normalizeSlashes(pattern).replace(/[.+^${}()|[\]\\]/g, "\\$&");
 	const body = escaped
-		.replace(/\*\*/g, "\u0000")
+		.replace(/\*\*+/g, "\u0000")
 		.replace(/\*/g, "[^/]*")
 		.replace(/\?/g, "[^/]")
 		.replace(/\u0000/g, ".*");
 	const regex = new RegExp(`^${body}$`, "i");
+	if (wildcardCache.size >= 128) wildcardCache.clear();
 	wildcardCache.set(pattern, regex);
 	return regex;
 }
@@ -334,27 +375,29 @@ async function firstContextFile(dir: string): Promise<string | undefined> {
 
 /** 收集上下文文件：<agent-dir> 与工作目录各级父目录。 */
 async function collectContextFiles(cwd: string): Promise<string[]> {
-	const candidates: string[] = [];
+	const found: string[] = [];
+	const addIfFile = async (file: string): Promise<void> => {
+		if ((await statKindAsync(file)) === "file") found.push(file);
+	};
+
 	const agent = agentDir();
-	candidates.push((await firstContextFile(agent)) ?? "");
-	candidates.push(join(agent, "APPEND_SYSTEM.md"));
+	// firstContextFile 已经 stat 过命中文件，直接复用，不要再全量 stat 一遍。
+	const agentContext = await firstContextFile(agent);
+	if (agentContext !== undefined) found.push(agentContext);
+	await addIfFile(join(agent, "APPEND_SYSTEM.md"));
 
 	let dir = resolve(cwd);
 	while (true) {
-		candidates.push((await firstContextFile(dir)) ?? "");
-		candidates.push(join(dir, ".pi", "APPEND_SYSTEM.md"));
+		const contextFile = await firstContextFile(dir);
+		if (contextFile !== undefined) found.push(contextFile);
+		await addIfFile(join(dir, ".pi", "APPEND_SYSTEM.md"));
 
 		const parent = dirname(dir);
 		if (parent === dir) break;
 		dir = parent;
 	}
 
-	const existing = await Promise.all(
-		candidates
-			.filter((file) => file.length > 0)
-			.map(async (file) => ((await statKindAsync(file)) === "file" ? file : "")),
-	);
-	return uniquePaths(existing.filter((file) => file.length > 0));
+	return uniquePaths(found);
 }
 
 /** 向上查找 git 仓库根目录，用于限制祖先目录扫描。 */
@@ -387,14 +430,13 @@ async function collectSkillFilesIn(dir: string, out: string[], depth = 0): Promi
 		}
 	}
 	// 同层子目录并行递归（串行 await 在深层树上会成倍放大启动延迟）。
-	await Promise.all(
-		entries.map(async (entry) => {
-			const full = join(dir, entry.name);
-			if ((await entryKind(entry, full)) === "dir") {
-				await collectSkillFilesIn(full, out, depth + 1);
-			}
-		}),
-	);
+	// 但并发要有上限：符号链接或大目录树不能瞬间发出上千个 stat。
+	await mapLimit(entries, 8, async (entry) => {
+		const full = join(dir, entry.name);
+		if ((await entryKind(entry, full)) === "dir") {
+			await collectSkillFilesIn(full, out, depth + 1);
+		}
+	});
 }
 
 /** 收集所有技能的 SKILL.md。 */
@@ -466,23 +508,21 @@ async function parseSkill(file: string): Promise<{ name: string; modelInvocation
 
 async function collectSkills(cwd: string, settings: SettingsPair): Promise<SkillEntry[]> {
 	const files = await collectSkillFiles(cwd, settings);
-	const skills = await Promise.all(
-		files.map(async (file) => {
-			const { name, modelInvocation } = await parseSkill(file);
-			const skillDirName = basename(dirname(file));
-			const userEnabled = isEnabledByPatterns(settings.user.skills, file, agentDir(), name, [
-				skillDirName,
-			]);
-			const projectEnabled = isEnabledByPatterns(
-				settings.project.skills,
-				file,
-				join(cwd, ".pi"),
-				name,
-				[skillDirName],
-			);
-			return { name, file, enabled: modelInvocation && userEnabled && projectEnabled };
-		}),
-	);
+	const skills = await mapLimit(files, 8, async (file) => {
+		const { name, modelInvocation } = await parseSkill(file);
+		const skillDirName = basename(dirname(file));
+		const userEnabled = isEnabledByPatterns(settings.user.skills, file, agentDir(), name, [
+			skillDirName,
+		]);
+		const projectEnabled = isEnabledByPatterns(
+			settings.project.skills,
+			file,
+			join(cwd, ".pi"),
+			name,
+			[skillDirName],
+		);
+		return { name, file, enabled: modelInvocation && userEnabled && projectEnabled };
+	});
 	return skills.sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -536,21 +576,19 @@ async function collectExtensions(
 
 	const files: string[] = [];
 	const knownKinds = new Map<string, PathKind>();
-	// 各 root 并行扫（同上：root 之间没有共享状态，只有各自的局部数组）。
-	const perRoot = await Promise.all(
-		uniquePaths(roots).map(async (root) => {
-			const found: string[] = [];
-			const kinds = new Map<string, PathKind>();
-			const kind = await statKindAsync(root);
-			if (kind === "dir") {
-				await collectExtensionFilesIn(root, found, kinds);
-			} else if (kind === "file") {
-				found.push(root);
-				kinds.set(root, "file");
-			}
-			return { found, kinds };
-		}),
-	);
+	// 各 root 并行扫（root 之间没有共享状态，只有各自的局部数组），并发同样设上限。
+	const perRoot = await mapLimit(uniquePaths(roots), 8, async (root) => {
+		const found: string[] = [];
+		const kinds = new Map<string, PathKind>();
+		const kind = await statKindAsync(root);
+		if (kind === "dir") {
+			await collectExtensionFilesIn(root, found, kinds);
+		} else if (kind === "file") {
+			found.push(root);
+			kinds.set(root, "file");
+		}
+		return { found, kinds };
+	});
 	for (const { found, kinds } of perRoot) {
 		files.push(...found);
 		for (const [file, kind] of kinds) knownKinds.set(file, kind);
@@ -626,60 +664,14 @@ async function collectMcpServers(cwd: string): Promise<McpEntry[]> {
 }
 
 /** 收集启动页要展示的全部信息（并行扫描三个来源）。 */
-/**
- * 收集启动页数据。
- *
- * context / skills 优先用 pi 自己的权威结果（`ctx.getSystemPromptOptions()`，
- * 它已经处理了 .gitignore / ignore 包 / packages / `/skill:name` 开关等规则），
- * 拿不到才退回本文件里的 best-effort 扫描。
- * 扩展清单没有对应 API，只能扫盘——这部分明确是"尽力而为"。
- */
-async function collectStartupData(cwd: string, ctx?: ExtensionContext): Promise<StartupData> {
+async function collectStartupData(cwd: string): Promise<StartupData> {
 	const settings = await readResourceSettings(cwd);
-	const promptOptions = readPromptOptions(ctx);
-	const promptContext = promptOptions?.contextFiles;
-	const promptSkills = promptOptions?.skills;
-
-	// promptOptions 存在时，空数组也是权威结果（pi 已经按 ignore/settings 过滤完）。
-	// 不能再用 `.length` 回退到 best-effort 扫描，否则会把 pi 排除掉的资源又显示出来。
-	const hasPromptContext = Array.isArray(promptContext);
-	const hasPromptSkills = Array.isArray(promptSkills);
-
-	// 只有 missing 的那部分才扫盘；否则每次启动都白跑一遍技能树/上下文目录。
-	const [scannedContext, scannedSkills, extensions] = await Promise.all([
-		hasPromptContext ? Promise.resolve<string[]>([]) : collectContextFiles(cwd),
-		hasPromptSkills ? Promise.resolve<SkillEntry[]>([]) : collectSkills(cwd, settings),
+	const [context, skills, extensions] = await Promise.all([
+		collectContextFiles(cwd),
+		collectSkills(cwd, settings),
 		collectExtensions(cwd, settings),
 	]);
-
-	const context = hasPromptContext
-		? promptContext.map((file) => file.path)
-		: scannedContext;
-
-	const skills = hasPromptSkills
-		? promptSkills
-				.map((skill) => ({
-					name: skill.name,
-					file: skill.filePath,
-					// 是否允许模型自动调用（pi 的 disableModelInvocation 反向）
-					enabled: skill.disableModelInvocation !== true,
-				}))
-				.sort((a, b) => a.name.localeCompare(b.name))
-		: scannedSkills;
-
 	return { context, skills, extensions };
-}
-
-/** `ctx.getSystemPromptOptions()` 是可选能力（老版本 pi 没有），失败就当拿不到。 */
-function readPromptOptions(ctx?: ExtensionContext): {
-	contextFiles?: Array<{ path: string }>;
-	skills?: Array<{ name: string; filePath: string; disableModelInvocation?: boolean }>;
-} | undefined {
-	try {
-		return ctx?.getSystemPromptOptions?.() as ReturnType<typeof readPromptOptions>;
-	} catch {
-		return undefined;
-	}
 }
 
 // ---- 渲染 ------------------------------------------------------------------
@@ -950,29 +942,31 @@ const dataPromiseCache = new Map<string, Promise<StartupData>>();
  * 缓存感知的启动页数据：命中就用缓存，否则扫一次并回填（面板的「加载」区也走这里）。
  * `force` 用于面板按 `r` 时真正重扫（否则 dataCache 会一直返回旧技能/扩展清单）。
  */
-async function getStartupData(
-	cwd: string,
-	ctx?: ExtensionContext,
-	force = false,
-): Promise<StartupData> {
+async function getStartupData(cwd: string, force = false): Promise<StartupData> {
+	const key = pathKey(cwd);
 	if (!force) {
-		const cached = dataCache.get(cwd);
+		const cached = dataCache.get(key);
 		if (cached) return cached;
-		const pending = dataPromiseCache.get(cwd);
+		const pending = dataPromiseCache.get(key);
 		if (pending) return pending;
 	}
 
-	const promise = collectStartupData(cwd, ctx);
-	dataPromiseCache.set(cwd, promise);
+	const promise = collectStartupData(cwd);
+	dataPromiseCache.set(key, promise);
 	promise.then(
 		(data) => {
 			// 已被更新的一次扫描（例如面板按 r 的 force）取代时，不要把旧结果写回缓存。
-			if (dataPromiseCache.get(cwd) !== promise) return;
-			dataPromiseCache.delete(cwd);
-			dataCache.set(cwd, data);
+			if (dataPromiseCache.get(key) !== promise) return;
+			dataPromiseCache.delete(key);
+			dataCache.set(key, data);
+			// cwd 通常只有一个；留几条足够覆盖 /cd 来回切，避免 Map 无上限。
+			if (dataCache.size > 3) {
+				const oldest = dataCache.keys().next().value;
+				if (oldest !== undefined) dataCache.delete(oldest);
+			}
 		},
 		() => {
-			if (dataPromiseCache.get(cwd) === promise) dataPromiseCache.delete(cwd);
+			if (dataPromiseCache.get(key) === promise) dataPromiseCache.delete(key);
 		},
 	);
 	return promise;
@@ -992,12 +986,11 @@ export interface SessionResources {
  */
 export async function collectSessionResources(
 	cwd: string,
-	ctx?: ExtensionContext,
 	extensionMcp: readonly string[] = [],
 	options: { force?: boolean } = {},
 ): Promise<SessionResources> {
 	const [data, mcp] = await Promise.all([
-		getStartupData(cwd, ctx, options.force === true),
+		getStartupData(cwd, options.force === true),
 		collectMcpServers(cwd),
 	]);
 	const enabledNames = (entries: ReadonlyArray<{ name: string; enabled: boolean }>): string[] =>
@@ -1016,34 +1009,31 @@ function setupStartupHeader(pi: ExtensionAPI): void {
 	// 每次 session_start +1：扫描完成时如果会话已经换掉，就别再动 header。
 	let generation = 0;
 
-	pi.on("session_shutdown", (event) => {
-		// reload 会重新加载扩展，技能/扩展清单可能变了 → 丢掉缓存
-		if (event.reason === "reload") {
-			dataCache.clear();
-			dataPromiseCache.clear();
-		}
-	});
-
 	pi.on("session_start", (_event, ctx: ExtensionContext) => {
 		if (ctx.mode !== "tui") return;
 		const current = ++generation;
 
+		const cwd = ctx.sessionManager.getCwd() || ctx.cwd;
+		const cached = dataCache.get(pathKey(cwd));
 		let header: StartupHeader | undefined;
 		let tui: TUI | undefined;
-		// 先挂“扫描中”骨架，再异步扫目录：大 home / 大仓库下同步递归扫描会卡住首帧。
-		// 命中缓存时直接把数据塞进工厂返回的组件（工厂可能要等到下一帧才被调）。
-		const cached = dataCache.get(ctx.cwd);
+		// 扫描可能先于工厂完成（工厂不一定同步被调）：把最新结果留在闭包里，
+		// 工厂真正创建组件时再补一次，不能靠"工厂已经同步跑过"这个隐含前提。
+		let latest: StartupData | undefined;
 		ctx.ui.setHeader((ui, theme) => {
 			tui = ui;
 			header = new StartupHeader(theme);
-			if (cached) header.setData(cached);
+			const initial = cached ?? latest;
+			if (initial) header.setData(initial);
 			return header;
 		});
 		if (cached) return;
 
-		void getStartupData(ctx.cwd, ctx)
+		void getStartupData(cwd)
 			.then((data) => {
-				if (current !== generation || header === undefined) return;
+				if (current !== generation) return;
+				latest = data;
+				if (header === undefined) return;
 				header.setData(data);
 				tui?.requestRender();
 			})
@@ -1052,8 +1042,13 @@ function setupStartupHeader(pi: ExtensionAPI): void {
 			});
 	});
 
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", (event) => {
 		generation++;
+		// reload 会重新加载扩展，技能/扩展清单可能变了 → 丢掉缓存
+		if (event.reason === "reload") {
+			dataCache.clear();
+			dataPromiseCache.clear();
+		}
 	});
 }
 

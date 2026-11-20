@@ -19,6 +19,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 import {
+	BOLD_ON,
 	CHROME_LEFT_PAD,
 	chromeLine,
 	contextUsageCached,
@@ -38,15 +39,12 @@ import {
 	type SessionStats,
 	type StatEntryLike,
 } from "./session-stats.ts";
-// 注意：缓存命中率是"越高越好"，用 hitRateMuted（levelOf 是"越高越糟"，别混）
-import { LEVEL_MUTED, hitRateMuted, levelOf, renderContextBar } from "./context-bar.ts";
+// 注意：缓存命中率是"越高越好"，用 hitRateText（levelOf 是"越高越糟"，别混）
+import { LEVEL_MUTED, hitRateText, levelOf, renderContextBar } from "./context-bar.ts";
 import { thinkingText as sharedThinkingText } from "./levels.ts";
 import type {
 	ContextUsageLike,
 } from "./core.ts";
-
-/** 是否显示第二行的 “会话名 • git 分支” 和第三行的 “当前工作目录”。 */
-const SHOW_CWD_LINE = true;
 
 /** “Ctx 文案 + ▣ 色条”整体至少要留多少列才值得显示。 */
 const MIN_CTX_ZONE = 12;
@@ -194,9 +192,8 @@ class StatusLineFooter implements Component {
 		}
 
 		if (render) this.tui.requestRender();
+		this.revision += 1;
 	}
-
-	invalidate(): void {}
 
 	dispose(): void {
 		this.unsubscribeBranch();
@@ -238,12 +235,14 @@ class StatusLineFooter implements Component {
 					this.gitStatusPending = false;
 					this.gitStatusAt = Date.now();
 					this.gitStatusFailed = Boolean(error);
+					this.revision += 1;
 					if (error) {
 						this.gitStatusValue = null;
 						// 失败时值没变，requestRender 纯属多一帧；成功才重绘。
 						return;
 					}
 					this.gitStatusValue = parseGitStatus(stdout);
+					this.revision += 1;
 					this.tui.requestRender();
 				},
 			);
@@ -261,12 +260,44 @@ class StatusLineFooter implements Component {
 	 */
 	private readonly statuses = new ExtensionStatusText();
 
+	/** 渲染缓存：数据只在 refresh / git 返回 / 4s TTL 时变。 */
+	private cachedWidth = -1;
+	private cachedKey = "";
+	private cachedLines: string[] | undefined;
+	/** 数据版本：refresh / git 状态变化时 +1。 */
+	private revision = 0;
+
 	private extensionStatusesText(statuses: ReadonlyMap<string, string>): string {
 		return this.statuses.update(statuses);
 	}
 
+	invalidate(): void {
+		this.cachedLines = undefined;
+	}
+
 	render(width: number): string[] {
 		const theme = this.theme;
+		const model = this.ctx.model;
+		const thinking = this.getThinkingLevel();
+		const statuses = this.footerData.getExtensionStatuses();
+		const statusText = statuses.size > 0 ? this.extensionStatusesText(statuses) : "";
+		const branch = this.footerData.getGitBranch() ?? "";
+		// git 状态的 TTL 是 4s：把它放进 key，保证缓存不会让 git 轮询永久停住。
+		const gitBucket = Math.floor(Date.now() / GIT_STATUS_TTL_MS);
+		const cacheKey = [
+			width,
+			this.revision,
+			model?.provider ?? "",
+			model?.id ?? "",
+			thinking,
+			branch,
+			statusText,
+			gitBucket,
+		].join("\u0000");
+		if (this.cachedLines !== undefined && this.cachedKey === cacheKey && this.cachedWidth === width) {
+			return this.cachedLines;
+		}
+
 		// 内容文字用 text 色；分隔符用固定灰色（不用 theme dim 色——SGR 22 会关掉加粗）。
 		const text = (value: string) => theme.fg("text", value);
 		const separator = `${MUTED} • ${RESET_FG}`;
@@ -274,18 +305,16 @@ class StatusLineFooter implements Component {
 		const innerWidth = Math.max(1, width - CHROME_LEFT_PAD);
 
 		// ---- 第一行：模型名(供应商) • 思考强度 • 命中率 • 花费 • 总 tokens ----
-		const model = this.ctx.model;
 		const modelName = model ? `${model.id}(${model.provider})` : "no-model";
-		const thinking = this.getThinkingLevel();
 
 		const totalTokens = text(`Total ${formatTokens(this.stats.totalTokens)}`);
 
 		const rate = this.stats.hasCache ? this.stats.cacheHitRate : undefined;
 		const cache =
-			rate === undefined || rate === null
+			rate === undefined
 				? text("Cache --")
-				// 命中率越高越好 → 用 hitRateMuted（别用 levelOf，那是"越高越糟"）
-				: text("Cache ") + fg24(hitRateMuted(rate), `${rate.toFixed(1)}%`);
+				// 命中率越高越好 → 用 hitRateText（别用 levelOf，那是"越高越糟"）
+				: text("Cache ") + hitRateText(rate);
 
 		const cost = text(`Cost ￥${(this.stats.cost * USD_TO_CNY).toFixed(2)}`);
 
@@ -305,36 +334,32 @@ class StatusLineFooter implements Component {
 		const windowText = contextWindow > 0 ? formatTokens(contextWindow) : "?";
 
 		const percent = usage?.percent;
-		const known = percent !== null && percent !== undefined;
+		const known = typeof percent === "number" && Number.isFinite(percent);
 		const percentText = known ? `${percent.toFixed(1)}%` : "?";
 
 		// ---- 第二行：会话名 • [git 分支与状态 •] Ctx 文案 + ▣ 色条 ----
-		const rawCwd = SHOW_CWD_LINE ? this.cwdText.raw : "";
-		const line2Parts: string[] = [];
+		const rawCwd = this.cwdText.raw;
+		const line2Parts: string[] = [text(this.sessionName || "未命名会话")];
 
-		if (SHOW_CWD_LINE) {
-			line2Parts.push(text(this.sessionName || "未命名会话"));
-
-			const branch = this.footerData.getGitBranch();
-			if (branch) {
-				let git = branch;
-				const status = this.gitStatus(rawCwd);
-				if (status) {
-					if (status.ahead > 0) git += ` ↑${status.ahead}`;
-					if (status.behind > 0) git += ` ↓${status.behind}`;
-					if (status.changed > 0) git += " *";
-				}
-				line2Parts.push(text(git));
+		if (branch) {
+			let git = branch;
+			const status = this.gitStatus(rawCwd);
+			if (status) {
+				if (status.ahead > 0) git += ` ↑${status.ahead}`;
+				if (status.behind > 0) git += ` ↓${status.behind}`;
+				if (status.changed > 0) git += " *";
 			}
+			line2Parts.push(text(git));
 		}
 
 		const line2Left = line2Parts.join(separator);
 
 		// 先给“Ctx 文案 + 色条”留出保底列数，剩下的给左侧；左侧实在塞不下才截断。
-		const left2Safe = truncateToWidth(
+		// 用 truncateBold：pi-tui 的 truncateToWidth 会在中间插 \x1b[0m，
+		// 把整行的 chromeLine 加粗从省略号处断掉。
+		const left2Safe = truncateBold(
 			line2Left,
 			Math.max(0, target - sepWidth - MIN_CTX_ZONE),
-			"...",
 		);
 		const ctxZone = Math.max(
 			0,
@@ -352,27 +377,39 @@ class StatusLineFooter implements Component {
 		const lines = [left, line2];
 
 		// ---- 第三行：当前工作目录独占一行 ----
-		if (SHOW_CWD_LINE) {
-			// 目录行按宽度截断，宽度变了才重算；cwd 本身取自 refresh() 的缓存。
-			if (this.cwdText.line === "" || this.cwdLineWidth !== innerWidth) {
-				this.cwdText.line = shortenPathLine(this.cwdText.short, innerWidth);
-				this.cwdLineWidth = innerWidth;
-			}
-			lines.push(this.cwdText.line);
+		// 目录行按宽度截断，宽度变了才重算；cwd 本身取自 refresh() 的缓存。
+		if (this.cwdText.line === "" || this.cwdLineWidth !== innerWidth) {
+			this.cwdText.line = shortenPathLine(this.cwdText.short, innerWidth);
+			this.cwdLineWidth = innerWidth;
 		}
+		lines.push(this.cwdText.line);
 
 		// ---- 其他扩展通过 ctx.ui.setStatus() 设置的状态 ----
-		const statuses = this.footerData.getExtensionStatuses();
-		if (statuses.size > 0) {
-			lines.push(truncateToWidth(text(this.extensionStatusesText(statuses)), innerWidth, "..."));
+		if (statusText) {
+			lines.push(truncateToWidth(text(statusText), innerWidth, "..."));
 		}
 
 		// 前两行右边缘严格对齐；整行加粗；最后统一加上左边缩进。
-		return lines.map((entry, index) => {
+		const result = lines.map((entry, index) => {
 			const fitted = fitToWidth(entry, index < 2 ? target : innerWidth);
 			return chromeLine(fitted);
 		});
+		this.cachedWidth = width;
+		this.cachedKey = cacheKey;
+		this.cachedLines = result;
+		return result;
 	}
+}
+
+/**
+ * 按宽度截断，且保证省略号之后仍然恢复加粗。
+ * `truncateToWidth` 的 ANSI 路径会返回 `prefix + \x1b[0m + ... + \x1b[0m`，
+ * 中间的 reset 会把 chromeLine 的 BOLD_ON 关掉。
+ */
+function truncateBold(text: string, width: number): string {
+	if (visibleWidth(text) <= width) return text;
+	if (width <= 3) return truncateToWidth(text, width, "...");
+	return `${truncateToWidth(text, width - 3, "")}${BOLD_ON}...`;
 }
 
 export function setupStatusline(pi: ExtensionAPI): void {

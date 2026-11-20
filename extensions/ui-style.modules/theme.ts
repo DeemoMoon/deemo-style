@@ -194,7 +194,8 @@ export const BAD_RED: Rgb = [248, 81, 73];
 /** 预览内容 / 分隔符的暗灰。 */
 export const MUTED = "\x1b[38;2;128;128;128m";
 /** 更暗一档的灰：未占用格子 / `!!` 边框。 */
-export const DIM_GRAY = "\x1b[38;2;110;110;110m";
+export const DIM_GRAY_RGB: Rgb = [110, 110, 110];
+export const DIM_GRAY = sgr(DIM_GRAY_RGB);
 /** 天青（速度图标低档色 / 编辑器命令符号）；Rgb 原值单独导出，动画需要它。 */
 export const SKY_BLUE_RGB: Rgb = [125, 211, 252];
 export const SKY_BLUE = sgr(SKY_BLUE_RGB);
@@ -233,7 +234,10 @@ export function patchPrototypeSlots<P extends ProtoRecord>(
 		(name) => record[slotKey(prefix, name)] === true &&
 			record[name] === record[patchedKey(prefix, name)],
 	);
-	if (allOwned) return;
+	// 同一批 impl 已安装才是 no-op。新模块 /reload 时会带一批新闭包：即使旧模块
+	// 的槽位还在也要接管，否则旧模块的 unpatch 会把新补丁一起摘掉。
+	const sameImpls = Object.entries(impls).every(([name, impl]) => record[name] === impl);
+	if (allOwned && sameImpls) return;
 	// 先完全恢复（不重打的话新旧闭包会混在同一原型上，互相吃掉对方的状态）
 	unpatchPrototypeSlots(proto, prefix, Object.keys(impls));
 	for (const [name, impl] of Object.entries(impls)) {
@@ -266,6 +270,20 @@ export function unpatchPrototypeSlots<P extends ProtoRecord>(
 		delete record[slotKey(prefix, name)];
 	}
 	return restored;
+}
+
+/**
+ * 取“真正属于 pi 的原方法”：如果槽位上还留着上一个模块实例打补丁前保存的
+ * original，就用它，而不是当前原型上的 patched 函数（否则会套一层旧闭包）。
+ */
+export function prototypeOriginal<P extends ProtoRecord, K extends keyof P & string>(
+	proto: P,
+	prefix: string,
+	name: K,
+): P[K] {
+	const record = proto as Record<string, unknown>;
+	const original = record[originalKey(prefix, name)];
+	return (original !== undefined ? original : proto[name]) as P[K];
 }
 
 /** Nerd Font 图标（宽度均为 1 列；图标 + 空格 = 2 列，与缩进计算配套）。 */

@@ -26,6 +26,7 @@ import {
 	LEADING_SPACES,
 	patchPrototypeSlots,
 	PI_OUTPUT_PAD,
+	prototypeOriginal,
 	unpatchPrototypeSlots,
 } from "./core.ts";
 
@@ -52,14 +53,20 @@ interface UserMessageRuntime {
 	text?: string;
 	outputPad?: number;
 	[key: `ui-style:${string}`]: unknown;
-	/** 按宽度 + 文本 + padding 缓存的变换结果。 */
-	__piUserPadCache?: {
-		width: number;
-		text: string | undefined;
-		outputPad: number | undefined;
-		lines: string[];
-	};
 }
+
+interface UserPadCacheEntry {
+	width: number;
+	text: string | undefined;
+	outputPad: number | undefined;
+	lines: string[];
+}
+
+/**
+ * 按实例缓存变换结果。用模块级 WeakMap 而不是实例字段：unpatch 时可以直接换一张
+ * 新表丢掉旧行（旧行里含旧主题的 ANSI），实例字段在原型恢复后没人清得掉。
+ */
+let userPadCache = new WeakMap<object, UserPadCacheEntry>();
 
 /**
  * 用户消息渲染补丁：整体左移一列，并删掉 Markdown paddingY 留在末尾的空行。
@@ -70,15 +77,15 @@ interface UserMessageRuntime {
  */
 export function patchUserMessagePad(): void {
 	const proto = UserMessageComponent.prototype as unknown as UserMessageRuntime;
-	// 先捕获原方法：patchPrototypeSlots 内部会做一次恢复再重打（幂等）。
-	const originalRender = proto.render;
-	const originalInvalidate = proto.invalidate;
+	// 从 original 槽位取 pi 的实现（避免 /reload 时把旧补丁当成 original）。
+	const originalRender = prototypeOriginal(proto, "ui-style:user-pad", "render");
+	const originalInvalidate = prototypeOriginal(proto, "ui-style:user-pad", "invalidate");
 
 	const patchedRender = function (this: UserMessageRuntime, width: number): string[] {
 		// pi 的 ScrollView 每帧会重渲染整个 transcript；Markdown 自己按宽度缓存，
 		// 但这里对每一行再去 ANSI/空格/尾行处理仍是 O(总行数)。缓存按
 		// (宽度, 文本, padding) 命中；invalidate() 时清空，主题切换不会拿旧颜色。
-		const cached = this.__piUserPadCache;
+		const cached = userPadCache.get(this);
 		if (
 			cached !== undefined &&
 			cached.width === width &&
@@ -122,12 +129,12 @@ export function patchUserMessagePad(): void {
 				result[end - 1] = (result[end - 1] ?? "") + trailingMarkers;
 			}
 		}
-		this.__piUserPadCache = {
+		userPadCache.set(this, {
 			width,
 			text: this.text,
 			outputPad: this.outputPad,
 			lines: result,
-		};
+		});
 		return result;
 	};
 	const impls: Record<string, (...args: never[]) => unknown> = {
@@ -135,7 +142,7 @@ export function patchUserMessagePad(): void {
 	};
 	if (typeof originalInvalidate === "function") {
 		const patchedInvalidate = function (this: UserMessageRuntime): void {
-			this.__piUserPadCache = undefined;
+			userPadCache.delete(this);
 			originalInvalidate.call(this);
 		};
 		impls.invalidate = patchedInvalidate as (...args: never[]) => unknown;
@@ -147,8 +154,8 @@ export function patchUserMessagePad(): void {
 export function unpatchUserMessagePad(): void {
 	const proto = UserMessageComponent.prototype as unknown as UserMessageRuntime;
 	unpatchPrototypeSlots(proto, "ui-style:user-pad", ["render", "invalidate"]);
-	// 缓存对象里藏着旧代码的行结果，槽位恢复后一并丢掉。
-	delete proto.__piUserPadCache;
+	// 缓存里藏着旧代码的行结果；换一张新表，旧实例的行随旧表一起被回收。
+	userPadCache = new WeakMap();
 }
 /** Theme 的 fg/bg 使用构造时缓存的 ANSI Map，这里只改用户消息用到的两个 token。 */
 interface ThemeInternals {

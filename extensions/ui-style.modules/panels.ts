@@ -39,6 +39,7 @@ import {
 	ICON_WRITE,
 	IndentedPreviewView,
 	LiveTailView,
+	MIN_EXEC_CLOCK_MS,
 	newWindowSnapshot,
 	normalizeNewlines,
 	PREVIEW_CONNECTOR_FIRST,
@@ -115,9 +116,17 @@ function cleanedTailText(raw: string, limit: number): string {
 		// 最多回扫 40 字符（最长 SGR 序列也就这么长）：超出一律当作不在
 		// 序列中间，避免超长单行每次都在这里回扫整个 8KB 窗口。
 		const escape = raw.lastIndexOf("\x1b", start);
-		if (escape !== -1 && escape >= start - 40) {
+		if (escape !== -1) {
 			const end = raw.indexOf("m", escape);
-			if (end === -1 || end >= start) start = escape;
+			if (end === -1) {
+				// 尾部整段都还在一个未终止的 SGR 里：没有可显示的正文。
+				// 直接把 start 推到末尾，避免 cleanText 留下 `[38;2;…` 这种参数片段。
+				start = raw.length;
+			} else if (end >= start) {
+				// 切点落在序列中间：回退到 ESC 起点；序列本身太长（>40 字符）时
+				// 就跳到终止符之后，反正参数部分不是给人看的。
+				start = escape >= start - 40 ? escape : end + 1;
+			}
 		}
 	}
 	return cleanText(raw.slice(start)).replace(/\n+$/, "");
@@ -290,6 +299,17 @@ function usePanelClock<T extends TimerState = TimerState>(
 		state,
 		getDuration: () => {
 			const live = clockText(state);
+			// 回放会话时 pi 会先用 isPartial=true 构造组件（此时我们开始计时），
+			// 紧接着 updateResult 把它置为结束态——本地时钟只跨了 0~1ms。
+			// 这种“一帧内跑完”不是真实耗时，优先使用 pi 持久化的 durationMs。
+			if (
+				!context.isPartial &&
+				state.endedAt !== undefined &&
+				state.endedAt - (state.startedAt ?? state.endedAt) < MIN_EXEC_CLOCK_MS &&
+				context.durationMs !== undefined
+			) {
+				return formatPanelDuration(context.durationMs);
+			}
 			if (live !== undefined) return live;
 			if (!context.isPartial && context.durationMs !== undefined) {
 				return formatPanelDuration(context.durationMs);
@@ -376,6 +396,10 @@ const PANEL_SPECS: Record<string, PanelHeaderSpec> = {
 	ls: { icon: ICON_SEARCH, label: "Ls", accent: ACCENT_GREEN, showClock: false },
 };
 
+/** ls 展开态的上限：目录可能有几千项，整段塞进 transcript 会让每帧重绘变慢。 */
+const MAX_LS_SOURCE_LINES = 500;
+const MAX_LS_VISUAL_LINES = 800;
+
 /**
  * ls 结果的圆角虚线边框视图：╭╌╌╌╮ / ╎ 内容 ╎ / ╰╌╌╌╯，
  * 内容按预览行数折叠；出错时边框与文本转红。
@@ -402,7 +426,7 @@ class LsBoxView extends CachedView {
 			// 后续 truncateToWidth 也收不住（pi 遇超宽行会报错停 TUI）。
 			const firstLine = [...this.sourceLines].find((line) => line.trim() !== "")?.trim() ?? "";
 			const label = firstLine || (this.isError ? "执行失败" : "(无输出)");
-			return [this.theme.fg(this.isError ? "error" : "text", label)];
+			return [`${UI_INDENT}${this.theme.fg(this.isError ? "error" : "text", label)}`];
 		}
 
 		const inner = width - 2;
@@ -420,10 +444,26 @@ class LsBoxView extends CachedView {
 				contentLines.push(segment);
 			}
 		} else {
-			// 只有展开态会走到这里（收起态是 3 行尾窗），直接铺全部内容。
-			for (const line of this.sourceLines) {
+			// 只有展开态会走到这里（收起态是 3 行尾窗）；大目录按源行/可视行封顶。
+			const shown = this.sourceLines.slice(0, MAX_LS_SOURCE_LINES);
+			for (const line of shown) {
 				contentLines.push(
 					...wrapTextWithAnsi(this.theme.fg(contentColor, line), contentWidth),
+				);
+			}
+			const omitted = this.sourceLines.length - shown.length;
+			if (omitted > 0) {
+				contentLines.push(
+					...wrapTextWithAnsi(
+						this.theme.fg("muted", `… 还有 ${omitted} 行（输出过大，已截断）`),
+						contentWidth,
+					),
+				);
+			}
+			if (contentLines.length > MAX_LS_VISUAL_LINES) {
+				contentLines.length = MAX_LS_VISUAL_LINES;
+				contentLines.push(
+					...wrapTextWithAnsi(this.theme.fg("muted", "…（已截断）"), contentWidth),
 				);
 			}
 		}
@@ -499,7 +539,8 @@ function panelResultBody(
 	options: RenderResultOptionsLike,
 	theme: Theme,
 	context: ToolRenderContextLike,
-	sourceLines: () => string[],
+	/** 完整正文；只在需要时调用（收起态不会再 split→join 白跑一趟）。 */
+	sourceText: () => string,
 	extra: { emptyLabel?: string; colorize?: (line: string) => string; keyHint?: KeyHintFn } = {},
 	view: ResultView = previewView,
 ): Component {
@@ -510,12 +551,12 @@ function panelResultBody(
 	// 经过 renderCall 的 touchClock，所以在这里也兜底定格一次（??= 幂等）。
 	if (!options.isPartial && state.startedAt !== undefined) state.endedAt ??= Date.now();
 
-	// 结果正文只取一次：以前展开/收起两条路径各调 1~2 次 sourceLines()，
-	// 对 1MB 输出来说每次都是一遍 split（edit 还要再 split diff）。
-	const resultLines = options.isPartial ? undefined : sourceLines();
+	// 完整正文只取一次；收起态直接用字符串，不再 split 成数组又 join 回来。
+	const fullText = options.isPartial ? undefined : sourceText().replace(/\n+$/u, "");
 
 	if (options.expanded) {
-		const lines = resultLines ?? sourceLines();
+		const expandedText = fullText ?? sourceText();
+		const lines = expandedText === "" ? [] : expandedText.split("\n");
 		state.resultLines = lines.length;
 		// 展开分支要传 hintOptions：折叠提示的 "to expand" 键位要跟用户自定义走。
 		return view(lines, true, context.isError, theme, hintOptions);
@@ -523,8 +564,8 @@ function panelResultBody(
 
 	// 运行中：partial 输出（bash/codemode）给实时尾窗；没有输出就让标题下的
 	// “执行中...”占位。完成后：同一块尾窗定格显示最后 3 行。
-	const text = options.isPartial ? liveOutputText(result) : (resultLines ?? []).join("\n");
-	state.resultLines = options.isPartial ? 0 : (resultLines ?? []).length;
+	const text = options.isPartial ? liveOutputText(result) : (fullText ?? sourceText());
+	state.resultLines = options.isPartial || text === "" ? 0 : text.split("\n").length;
 	if (!text.trim()) {
 		state.liveOutput = false;
 		if (options.isPartial) return setText(context, "");
@@ -539,14 +580,14 @@ function panelResultBody(
 	return new LiveTailView(
 		{ text: () => text, finished: () => !options.isPartial, window: state.window },
 		theme,
-		// 工具框不额外打“上面还有内容”：标题行已经有 “· N 行”，省下一行给正文
-		{ maxLines: LIVE_PANEL_LINES, cursor: true },
+		// 工具框不额外打“上面还有内容”：标题行已经有 “· N 行”，省下一行给正文。
+		// 失败结果的正文整体转红：去掉背景色后，这是唯一还能一眼看出的错误信号。
+		{
+			maxLines: LIVE_PANEL_LINES,
+			cursor: true,
+			colorize: context.isError ? (line) => theme.fg("error", line) : undefined,
+		},
 	);
-}
-
-/** 默认正文：工具结果的文本输出。 */
-function resultTextLines(result: ToolResultLike): string[] {
-	return resultOutput(result).split("\n");
 }
 
 /** 所有面板共用的 renderCall：标题 + 现算耗时（running 时附“执行中”行）。 */
@@ -578,7 +619,7 @@ function simplePanel(spec: PanelHeaderSpec, view: ResultView = previewView): Too
 				options,
 				theme,
 				context,
-				() => resultTextLines(result),
+				() => resultOutput(result),
 				{},
 				view,
 			);
@@ -635,7 +676,7 @@ function writePanel(spec: PanelHeaderSpec): ToolPanelRenderer {
 				options,
 				theme,
 				context,
-				() => body.split("\n"),
+				() => body,
 				{ emptyLabel: "(空内容)" },
 			);
 		},
@@ -695,6 +736,8 @@ function editPanel(spec: PanelHeaderSpec): ToolPanelRenderer {
 								{ colorize: colorizeDiffLine },
 							)
 						: undefined;
+			// 有预览体时标题下面不再重复一行“执行中...”，否则会出现两个 ⎿。
+			state.liveOutput = previewBody !== undefined;
 
 			return new EditCallView(
 				panelHeader(spec, context, theme, getDuration, state),
@@ -709,15 +752,20 @@ function editPanel(spec: PanelHeaderSpec): ToolPanelRenderer {
 			context: ToolRenderContextLike,
 		) {
 			const state = getTimerState(context) as EditPanelState;
-			// 出错显示错误文本；成功显示统一 diff（pi 放在 details.diff，
-			// 个别 provider 缺失时回退到执行中的预览 diff）。
+			// 失败时错误文本优先；成功时 details.diff 是权威，缺失才回退预览 diff。
 			const typedResult = result as { details?: { diff?: unknown } };
-			const rawDiff =
-				!context.isError && typeof typedResult.details?.diff === "string"
+			const rawDiff = context.isError
+				? undefined
+				: typeof typedResult.details?.diff === "string"
 					? typedResult.details.diff
 					: state.previewDiff;
-			// previewDiff 已归一化过；只有 details.diff 还需要兜底 replace。
-			const diff = typeof rawDiff === "string" ? rawDiff.replace(/\r\n?/g, "\n") : "";
+			// previewDiff 已在赋值时归一化过；只有 details.diff 还需要兜底 replace。
+			const diff =
+				typeof rawDiff === "string"
+					? rawDiff === state.previewDiff
+						? rawDiff
+						: rawDiff.replace(/\r\n?/gu, "\n")
+					: "";
 			const sourceText = diff || resultOutput(result);
 			if (!sourceText) {
 				// 没有 diff：一行占位（展开时也一样，没啥可展开的）
@@ -732,7 +780,7 @@ function editPanel(spec: PanelHeaderSpec): ToolPanelRenderer {
 				options,
 				theme,
 				context,
-				() => sourceText.split("\n"),
+				() => sourceText,
 				{ colorize: colorizeDiffLine },
 			);
 		},

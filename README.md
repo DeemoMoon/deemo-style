@@ -132,6 +132,8 @@ export const FEATURES = {
   此时更新本扩展即可。
 - 信息面板的模型/思考改动**不会持久化**（pi 的扩展 API 没有 `persist`）。
 - 鼠标在 tmux / zellij 下不上报"纯移动"，但点击和滚轮正常。
+- 本扩展默认折叠思考块；pi 设置里的 `hideThinkingBlock: false` 在扩展启用期间会被默认折叠覆盖，
+  按一次 `Ctrl+T` 之后以用户选择为准。
 
 ## 发布（给自己看）
 
@@ -174,7 +176,7 @@ extensions/ui-style.modules/
   startup.ts        启动页
   info-panel.ts     会话信息面板（alt+i）
   reading.ts        长回复结束后跳回开头
-  tests/            85 个单测 + 行为测试
+  tests/            142 个单测 + 行为测试
 ```
 
 ## 测试

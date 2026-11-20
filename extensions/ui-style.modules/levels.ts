@@ -5,7 +5,7 @@
  * 天蓝、一边是黄）。统一到这里：档位顺序、模型能力过滤、配色都只有一份。
  */
 
-import { fg24 } from "./core.ts";
+import { DIM_GRAY_RGB, fg24, SKY_BLUE_RGB } from "./core.ts";
 import type { Rgb } from "./core.ts";
 
 /** 从低到高的全部档位（pi 的定义顺序）。 */
@@ -14,12 +14,12 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export type ThinkingLevelName = (typeof THINKING_LEVELS)[number];
 
 /** 档位 → 颜色（状态栏、信息面板、思考块共用一套观感）。 */
-export const THINKING_COLORS: Record<string, Rgb> = {
-	off: [110, 110, 110],
+export const THINKING_COLORS: Record<ThinkingLevelName, Rgb> = {
+	off: DIM_GRAY_RGB,
 	minimal: [120, 120, 120],
 	low: [95, 135, 215],
 	medium: [79, 179, 217],
-	high: [125, 211, 252],
+	high: SKY_BLUE_RGB,
 	xhigh: [234, 182, 93],
 	max: [228, 138, 122],
 };
@@ -46,7 +46,7 @@ export interface ThinkingModelLike {
  * 对照版本：pi-coding-agent **1.5.2**（`dist/core/model-runtime.js` 的
  * `getSupportedThinkingLevels`）。升级 pi 时如果"思考档位列表"行为变了，先看这里。
  */
-export function supportedThinkingLevels(model: ThinkingModelLike | undefined): string[] {
+export function supportedThinkingLevels(model: ThinkingModelLike | undefined): ThinkingLevelName[] {
 	if (!model?.reasoning) return ["off"];
 	return THINKING_LEVELS.filter((level) => {
 		const mapped = model.thinkingLevelMap?.[level];

@@ -50,13 +50,13 @@ import {
 	BOLD_OFF,
 	BOLD_ON,
 	CachedView,
-	cleanText,
 	clockText,
 	formatTokens,
 	getTimerState,
 	OK_GREEN,
 	PREVIEW_CONNECTOR_REST,
 	RESET_FG,
+	resultOutput,
 	sgr,
 	touchClock,
 	UI_INDENT,
@@ -204,11 +204,17 @@ function renderCachedBlocks(options: {
 			child.status,
 			child.usage.input,
 			child.usage.output,
+			child.usage.cacheRead,
+			child.usage.cacheWrite,
 			child.messages.length,
 			childActivityText(child.messages).length,
-			// model 也进签名：底行用 childModel()，若 pi 之后才补写 details.model，
-			// 不带它就会命中旧缓存、底行永久缺模型名。
+			// 运行中的块要随时钟/扫光重画；否则子代理等长工具时签名不变，
+			// 块标题的耗时与扫光会冻在最后一次内容变化上。
+			child.status === "running" ? Math.floor(Date.now() / 50) : 0,
+			// model / 错误证据也进签名：底行和失败信息都依赖它们。
 			child.model ?? "",
+			child.errorMessage ?? "",
+			child.stderr,
 		].join("\u0000");
 		const cached = state.blockCache!.get(childKey(index));
 		if (cached !== undefined && cached.signature === signature) return cached.lines;
@@ -394,7 +400,7 @@ class MultiAgentView extends CachedView {
 		];
 		const selection =
 			this.details.mode === "chain"
-				? chainWindowChildren(this.details.results, false)
+				? chainWindowChildren(this.details.results, this.expanded)
 				: windowedChildren(this.details.results, this.expanded);
 		const { hidden, indices } = selection;
 		const blockLines: string[] = [];
@@ -403,7 +409,7 @@ class MultiAgentView extends CachedView {
 				state: this.state,
 				children: this.details.results,
 				indices,
-				extra: `run:${this.running ? 1 : 0}`,
+				extra: `run:${this.running ? 1 : 0}:exp:${this.expanded ? 1 : 0}`,
 				width,
 				build: (child, index) =>
 					new AgentBlockView({
@@ -411,7 +417,7 @@ class MultiAgentView extends CachedView {
 						state: this.state,
 						theme: this.theme,
 						running: this.running && isChildActive(child),
-						expanded: false,
+						expanded: this.expanded,
 						showTitle: true,
 						nest: CHILD_NEST,
 						index,
@@ -527,7 +533,12 @@ class SubagentResultView extends CachedView {
 		if (hit === undefined) return undefined;
 		const child = this.details.results[hit.index];
 		if (child === undefined) return undefined;
-		void showChildResultOverlay(child, clockText(childClock(this.state, child, hit.index)));
+		void showChildResultOverlay(
+			child,
+			clockText(childClock(this.state, child, hit.index)),
+		).catch(() => {
+			// ui.custom 抛错时不要变成 unhandled rejection（会把 pi 进程带走）。
+		});
 		return { handled: true };
 	}
 
@@ -612,21 +623,6 @@ function detailsOf(result: ToolResultLike): SubagentDetailsLike | undefined {
 	return candidate;
 }
 
-/**
- * 结果文本（`result.content`）。
- *
- * 用 `cleanText` 与工具面板的 `resultOutput()` 保持同一清洗口径（去 ANSI / 归一
- * 换行 / 制表符展开）；细节是这里**不**裁剪尾部空行，结论的段落结构要留着。
- */
-function resultText(result: ToolResultLike): string {
-	return cleanText(
-		result.content
-			.filter((part) => part.type === "text")
-			.map((part) => part.text ?? "")
-			.join("\n"),
-	).trim();
-}
-
 /** subagent 面板（single / parallel / chain 统一入口）。 */
 export function subagentPanel(): {
 	renderShell: "self";
@@ -677,7 +673,7 @@ export function subagentPanel(): {
 			if (!details) {
 				// 异常路径（没有 details）：退化成一行文本，不把块打没。
 				return new LineView(
-					() => `${UI_INDENT}${theme.fg("text", resultText(result) || "(无输出)")}`,
+					() => `${UI_INDENT}${theme.fg("text", resultOutput(result) || "(无输出)")}`,
 				);
 			}
 			// 把状态缓存下来：renderCall 拿不到 details，标题行尾的 ✓/✗/󰈑 靠它。
@@ -712,7 +708,7 @@ export function subagentPanel(): {
 				theme,
 				options.expanded,
 				state,
-				resultText(result),
+				resultOutput(result),
 				expectedTotal,
 			);
 		},

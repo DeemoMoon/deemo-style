@@ -80,8 +80,6 @@ const TERMINAL_MARGIN = 4;
 const LABEL_WIDTH = 6;
 /** 同一行多格之间的间隔。 */
 const CELL_GAP = 3;
-/** 可见内容行数下限。 */
-const MIN_VIEWPORT = 5;
 /** 下拉列表最多同时显示多少项（超过就滚动）。 */
 const DROPDOWN_MAX_VISIBLE = 8;
 /** 下拉框内部左右各留一列。 */
@@ -142,16 +140,10 @@ export function cursorAtColumn(chars: string[], column: number): number {
 	return chars.length;
 }
 
-/** 按可见宽度补空格（行尾对齐用）—— 与状态栏共用 core.fitToWidth。 */
-function padTo(line: string, width: number): string {
-	return fitToWidth(line, width);
-}
-
-/** 一行里的值可以带 ANSI；`hint` 是不参与着色的灰色说明（如 “← → 切换”）。 */
+/** 一行里的值可以带 ANSI。 */
 export interface Cell {
 	label: string;
 	value: string;
-	hint?: string;
 }
 
 /** 内容行：文本 + 该行对应的可编辑字段（有则说明是可改的行）。 */
@@ -228,8 +220,7 @@ export function collectSessionInfoView(
 /** 单元格 → 文本（标签补到 LABEL_WIDTH）。 */
 function cellText(cell: Cell): string {
 	const pad = " ".repeat(Math.max(2, LABEL_WIDTH - visibleWidth(cell.label)));
-	const hint = cell.hint ? `${MUTED}${cell.hint}${RESET_FG}` : "";
-	return `${MUTED}${cell.label}${RESET_FG}${pad}${cell.value}${hint}`;
+	return `${MUTED}${cell.label}${RESET_FG}${pad}${cell.value}`;
 }
 
 /** 多格并排：先按等宽分，最后一格吃掉余量。 */
@@ -265,34 +256,56 @@ function fieldRow(
 	const mark = focused ? `${SKY_BLUE}${FOCUS_MARK}${RESET_FG}` : " ";
 	const label = focused ? `${SKY_BLUE}${cell.label}${RESET_FG}` : `${MUTED}${cell.label}${RESET_FG}`;
 
+	// 右侧箭头区（鼠标可点；键盘 ←→ 等价）
+	const arrowText = arrows ? (focused ? `${SKY_BLUE}${ARROW_ZONE}${RESET_FG}` : `${MUTED}${ARROW_ZONE}${RESET_FG}`) : "";
+	const arrowWidth = visibleWidth(ARROW_ZONE);
+	// 值先给箭头让位：箭头是固定短语，值可以被截断
+	const fixed =
+		visibleWidth(mark) + visibleWidth(label) + pad.length + (arrows ? arrowWidth + 1 : 0);
+	const valueBudget = Math.max(4, width - fixed);
+	const valueCol = visibleWidth(mark) + visibleWidth(label) + pad.length;
+
 	let value = cell.value;
-	const hint = cell.hint ? `${MUTED}${cell.hint}${RESET_FG}` : "";
 	if (editing) {
-		// 文本编辑：光标用一条细竖线表示（不闪烁，避免额外定时器）
+		// 文本编辑：光标用一条细竖线表示（不闪烁，避免额外定时器）。
+		// 草稿超过可见宽度时做水平滚动窗口，保证光标始终可见（否则改名时
+		// 长名字会把光标和正在输入的部分截到右边看不见）。
 		const chars = Array.from(draft);
 		if (selectAll && chars.length > 0) {
 			// 全选态：反显整段（下一次输入就整体替换）
 			value = `${SELECT_ALL_ON}${theme.fg("text", chars.join(""))}${SELECT_ALL_OFF}${SKY_BLUE}▏${RESET_FG}`;
 		} else {
-			const before = chars.slice(0, cursor).join("");
-			const after = chars.slice(cursor).join("");
+			let start = 0;
+			if (visibleWidth(draft) + 1 > valueBudget) {
+				let used = 1;
+				start = cursor;
+				while (start > 0) {
+					const charWidth = visibleWidth(chars[start - 1]!);
+					if (used + charWidth > valueBudget) break;
+					used += charWidth;
+					start -= 1;
+				}
+			}
+			let end = cursor;
+			let used = 1;
+			for (let i = start; i < cursor; i++) used += visibleWidth(chars[i]!);
+			while (end < chars.length) {
+				const charWidth = visibleWidth(chars[end]!);
+				if (used + charWidth > valueBudget) break;
+				used += charWidth;
+				end += 1;
+			}
+			const before = chars.slice(start, cursor).join("");
+			const after = chars.slice(cursor, end).join("");
 			value = `${theme.fg("text", before)}${SKY_BLUE}▏${RESET_FG}${theme.fg("text", after)}`;
 		}
 	} else if (focused) {
 		value = `${SKY_BLUE}${stripAnsi(cell.value)}${RESET_FG}`;
 	}
 
-	// 右侧箭头区（鼠标可点；键盘 ←→ 等价）
-	const arrowText = arrows ? (focused ? `${SKY_BLUE}${ARROW_ZONE}${RESET_FG}` : `${MUTED}${ARROW_ZONE}${RESET_FG}`) : "";
-	const arrowWidth = visibleWidth(ARROW_ZONE);
-	// 值先给 hint / 箭头让位：那些是固定短语，值可以被截断
-	const fixed =
-		visibleWidth(mark) + visibleWidth(label) + pad.length + visibleWidth(hint) +
-		(arrows ? arrowWidth + 1 : 0);
-	const valueCol = visibleWidth(mark) + visibleWidth(label) + pad.length;
-	const valueText = truncateToWidth(value, Math.max(4, width - fixed), "…");
+	const valueText = truncateToWidth(value, valueBudget, "…");
 
-	const left = `${mark}${label}${pad}${valueText}${hint}`;
+	const left = `${mark}${label}${pad}${valueText}`;
 	if (!arrows) return { text: truncateToWidth(left, width, "…"), valueCol };
 
 	// 箭头右对齐；但"自然宽度"只算到箭头为止（否则整行会被撑满、弹窗跟着变宽）
@@ -464,14 +477,16 @@ export function framePanel(
 
 	const body = rows
 		.slice(top, top + viewport)
-		.map((row) => `${BORDER}│${RESET_FG} ${padTo(row.text, inner)} ${BORDER}│${RESET_FG}`);
+		.map((row) => `${BORDER}│${RESET_FG} ${fitToWidth(row.text, inner)} ${BORDER}│${RESET_FG}`);
 
 	return [titleLine, ...body, bottomLine];
 }
 
-/** 可见内容行数：终端行数扣掉边框与提示，再按内容封顶。 */
+/** 可见内容行数：终端行数扣掉上下边框（2）+ overlay margin（2）。 */
 export function panelViewport(terminalRows: number, lineCount: number): number {
-	const available = Math.max(MIN_VIEWPORT, terminalRows - 3);
+	// overlay 还有 margin:1 与 maxHeight:95%；留 4 行才能保证底边框（含 Esc 提示）
+	// 不被 pi 的 maxHeight 截掉。
+	const available = Math.max(1, terminalRows - 4);
 	return Math.max(1, Math.min(lineCount, available));
 }
 
@@ -537,7 +552,9 @@ class SessionInfoPanel implements Component {
 	private readonly pi: ExtensionAPI;
 	private readonly ctx: ExtensionContext;
 	private readonly done: () => void;
-	private readonly terminalRows: number;
+	private terminalRows: number;
+	/** 面板已关闭：飞行中的异步回调不能再写状态/重绘。 */
+	private closed = false;
 
 	constructor(
 		theme: Theme,
@@ -563,6 +580,9 @@ class SessionInfoPanel implements Component {
 	}
 
 	render(width: number): string[] {
+		// resize 后 alt-screen 的行数会变；用最新值，否则底边框会被截掉。
+		const liveRows = (this.tui as unknown as { terminal?: { rows?: number } }).terminal?.rows;
+		if (typeof liveRows === "number" && liveRows > 0) this.terminalRows = liveRows;
 		// 宽度固定用 overlay 给的值（打开时已按内容算好）：内容变化只重排，不改盒子宽度，
 		// 否则换模型后盒子会变窄并在弹窗里左移。
 		const effective = Math.max(FRAME_EXTRA + 1, width);
@@ -636,7 +656,7 @@ class SessionInfoPanel implements Component {
 		const lines: string[] = [`${BORDER}${left}╭${"─".repeat(topFill)}╮${RESET_FG}`];
 		for (const line of body) {
 			lines.push(
-				`${BORDER}${left}│${RESET_FG} ${padTo(line, boxInner)} ${BORDER}│${RESET_FG}`,
+				`${BORDER}${left}│${RESET_FG} ${fitToWidth(line, boxInner)} ${BORDER}│${RESET_FG}`,
 			);
 		}
 		const hint = state.query ? ` 过滤：${state.query}` : " ↑↓ 选择 · 输入过滤 · Enter 确认 · Esc 取消";
@@ -689,7 +709,7 @@ class SessionInfoPanel implements Component {
 		// 切换模型期间输入被 busy 挡住；但 Esc/q 仍应能关闭面板，不能让用户被困住。
 		// 注意不能放在 dropdown 之前处理，否则 Esc 会关掉整个面板而不是先收起下拉。
 		if (this.busy) {
-			if (matchesKey(data, "escape") || data === "q" || data === "Q") this.done();
+			if (matchesKey(data, "escape") || data === "q" || data === "Q") this.close();
 			return;
 		}
 
@@ -704,7 +724,7 @@ class SessionInfoPanel implements Component {
 		}
 
 		if (matchesKey(data, "escape") || data === "q" || data === "Q") {
-			this.done();
+			this.close();
 			return;
 		}
 		if (matchesKey(data, "tab")) {
@@ -872,16 +892,18 @@ class SessionInfoPanel implements Component {
 	}
 
 	private applyDropdownFilter(state: NonNullable<typeof this.dropdown>): void {
+		const previous = state.list.getSelectedItem()?.value;
 		const items = state.query
 			? fuzzyFilter(state.all, state.query, (item) => `${item.value} ${item.description ?? ""}`)
 			: state.all;
 		const maxVisible = Math.max(3, Math.min(DROPDOWN_MAX_VISIBLE, this.terminalRows - 16));
-		const list = new SelectList(
-			items.length > 0 ? items : state.all,
-			maxVisible,
-			getSelectListTheme(),
-			DROPDOWN_LAYOUT,
-		);
+		// 过滤无匹配时保留空列表（SelectList 会显示 No matching），**不能**回退到
+		// state.all——否则 Enter 会误切到当前高亮项。
+		const list = new SelectList(items, maxVisible, getSelectListTheme(), DROPDOWN_LAYOUT);
+		if (previous !== undefined) {
+			const index = items.findIndex((item) => item.value === previous);
+			if (index >= 0) list.setSelectedIndex(index);
+		}
 		this.attachListHandlers(list, state.field);
 		state.list = list;
 	}
@@ -918,7 +940,15 @@ class SessionInfoPanel implements Component {
 			this.message = `${fg24(BAD_RED, `× ${String(error)}`)}${RESET_FG}`;
 		}
 		this.busy = false;
-		this.refresh(false);
+		if (this.closed) return;
+		// refresh 会读 ctx 的守卫 getter（/reload 后会抛），必须自己兜底，
+		// 否则 void 调用会变成 unhandled rejection 把 pi 进程带走。
+		try {
+			this.refresh(false);
+		} catch (error) {
+			this.message = `${fg24(BAD_RED, `× ${String(error)}`)}${RESET_FG}`;
+			this.requestRender();
+		}
 	}
 
 	/** 应用下拉选择（模型 → setModel，思考 → setThinkingLevel）。 */
@@ -1234,6 +1264,7 @@ class SessionInfoPanel implements Component {
 	}
 
 	private refresh(clearMessage = true): void {
+		if (this.closed) return;
 		const next = collectSessionInfoView(this.ctx, this.pi.getThinkingLevel(), this.resources);
 		if (this.modelOverride) {
 			// ctx.model 追上本地权威值 → 覆盖作废；否则继续用本地值
@@ -1258,18 +1289,30 @@ class SessionInfoPanel implements Component {
 		try {
 			this.resources = await collectSessionResources(
 				this.view.cwd,
-				this.ctx,
 				mcpServersFromApi(this.pi),
 				{ force: true },
 			);
 		} catch {
 			// 扫描失败：保留上一次的清单
 		}
-		this.refresh();
+		if (this.closed) return;
+		try {
+			this.refresh();
+		} catch {
+			// ctx 已失效（/reload）：保持当前面板内容。
+		}
+	}
+
+	/** 关闭面板：置位后飞行中的异步回调不再碰 TUI。 */
+	private close(): void {
+		if (this.closed) return;
+		this.closed = true;
+		this.done();
 	}
 
 	/** 内容（焦点 / 草稿 / 提示）变了：标记脏，下一帧按新内容重排并重绘。 */
 	private requestRender(): void {
+		if (this.closed) return;
 		this.width = 0;
 		this.tui.requestRender();
 	}
@@ -1287,13 +1330,14 @@ export async function showSessionInfoPanel(pi: ExtensionAPI, ctx: ExtensionConte
 	const cwd = ctx.sessionManager.getCwd() || ctx.cwd;
 	let resources: SessionResources;
 	try {
-		resources = await collectSessionResources(cwd, ctx, mcpServersFromApi(pi));
+		resources = await collectSessionResources(cwd, mcpServersFromApi(pi));
 	} catch {
 		resources = EMPTY_RESOURCES;
 	}
 
 	// overlay 的宽度 = 内容宽度（这样才是"盒子居中"，而不是"文字贴左"）。
-	// 宽度只能从 tui 问到，所以用可变对象 + 函数式 overlayOptions 让它跟随渲染。
+	// 宽度只能从 tui 问到，所以先让工厂算出 size.width；pi 会在工厂返回后解析
+	// 一次 overlayOptions（不是每帧），此时宽度已经就绪。
 	const size = { width: MIN_INNER + FRAME_EXTRA };
 
 	await ctx.ui.custom(

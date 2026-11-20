@@ -85,6 +85,9 @@ const BAR_GLYPHS: Record<BarStyle, { filled: string; empty: string }> = {
 /** 未占用格子的颜色（统一暗灰）。 */
 const BAR_EMPTY_RGB: Rgb = [90, 90, 90];
 
+/** 已生成的色条缓存：key = `${cells}|${percent}`，填充/配色只随这两个值变。 */
+const barCache = new Map<string, string>();
+
 /**
  * 渲染占用率色条：格子的填充判定与颜色统一按"格子中点"口径——
  * 中点 ≤ 占用率才算已占用，已占用格的颜色也按中点取档位，两者天然一致
@@ -98,6 +101,9 @@ export function renderContextBar(
 	style: BarStyle = "box",
 ): string {
 	if (cells <= 0) return "";
+	const cacheKey = `${cells}|${percent ?? ""}`;
+	const cached = barCache.get(cacheKey);
+	if (cached !== undefined) return cached;
 	const glyphs = BAR_GLYPHS[style];
 	const known = typeof percent === "number" && Number.isFinite(percent);
 	const clamped = known ? Math.max(0, Math.min(100, percent)) : 0;
@@ -110,5 +116,8 @@ export function renderContextBar(
 		const rgb = isFilled ? levelRgb(midpoint) : BAR_EMPTY_RGB;
 		parts.push(`${sgr(rgb)}${isFilled ? glyphs.filled : glyphs.empty}${RESET_FG}`);
 	}
-	return parts.join("");
+	const value = parts.join("");
+	if (barCache.size >= 64) barCache.clear();
+	barCache.set(cacheKey, value);
+	return value;
 }
