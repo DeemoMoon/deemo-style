@@ -32,12 +32,14 @@ import {
 import {
 	BranchSummaryMessageComponent,
 	CompactionSummaryMessageComponent,
+	estimateTokens,
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import {
 	BOLD_OFF,
 	BOLD_ON,
 	CachedView,
+	formatPanelDuration,
 	formatTokens,
 	ICON_CLOCK,
 	MUTED,
@@ -62,6 +64,14 @@ export const ICON_BRANCH = "\uDB85\uDCCA";
 
 /** 摘要块折叠态窗口行数（固定高度，不随摘要长度变化）。 */
 export const SUMMARY_WINDOW_LINES = 5;
+/**
+ * 压缩中"原文窗口"的滚动节拍（毫秒/行）。
+ *
+ * 原文是 `session_before_compact` 一次性给的，没有真流式；这里让窗口按时间
+ * 自动下滚，形成"内容在往下流"的观感（与 `!` 命令框/tail 窗口同一套做法：
+ * 纯函数算位置，帧由 pi 的 spinner 提供）。滚到底就停在尾部。
+ */
+export const SUMMARY_SCROLL_MS = 350;
 
 /** 标题色：压缩用蓝、分支用紫（与其它块同族，又能区分）。 */
 const COMPACTION_ACCENT: Rgb = [95, 135, 215];
@@ -85,32 +95,69 @@ interface SummaryMessageLike {
 	timestamp?: number;
 }
 
-/** 最近一次压缩的本地耗时（事件里测，紧随其后的块里显示）。 */
-let lastCompaction: { endedAt: number; elapsedMs: number } | undefined;
+/**
+ * 一次压缩在本进程内测到的结果。
+ *
+ * pi 的 CompactionEntry 只存 `tokensBefore`，既没有耗时也没有压缩后大小
+ * （`estimatedTokensAfter` 只在内部结果里，不落盘）。所以：
+ *   - 新压缩：用 `session_before_compact` / `session_compact` 现场测，按 entry id 存；
+ *   - 历史回放：没有可信数据，显示 `--`，绝不编造。
+ */
+interface CompactionRecord {
+	elapsedMs: number;
+	/** 压缩后的上下文估算（pi 同一套 estimateTokens）。 */
+	tokensAfter?: number;
+}
 
-/** 记一次压缩耗时（供紧随其后的摘要块显示）。 */
-export function recordCompactionTiming(elapsedMs: number, now = Date.now()): void {
-	lastCompaction = { endedAt: now, elapsedMs };
+/** entry id → 本地测到的压缩结果。 */
+const compactionByEntryId = new Map<string, CompactionRecord>();
+/** 没有 id 可用时的兜底（紧随其后的那个块）。 */
+let lastCompaction: CompactionRecord | undefined;
+
+/** 记一次压缩结果（供摘要块显示）。 */
+export function recordCompactionResult(
+	record: CompactionRecord,
+	entryId?: string,
+): void {
+	lastCompaction = record;
+	if (entryId !== undefined) compactionByEntryId.set(entryId, record);
 }
 
 /** 清掉（切换会话时）。 */
 export function resetCompactionTiming(): void {
 	lastCompaction = undefined;
+	compactionByEntryId.clear();
 }
 
-/** 标题行文案（不含块缩进）。 */
+/** 取这个块对应的本地记录（优先按 entry id，其次用最近一次）。 */
+export function compactionRecord(entryId?: string): CompactionRecord | undefined {
+	if (entryId !== undefined) {
+		const hit = compactionByEntryId.get(entryId);
+		if (hit !== undefined) return hit;
+	}
+	return lastCompaction;
+}
+
+/**
+ * 标题行文案（不含块缩进）。
+ *
+ * 时钟**始终显示**：测到了就显示真实耗时，没有（历史回放）就显示 `--`
+ * ——宁可能看出"没有数据"，也不要让这一行的结构随数据变来变去。
+ */
 export function summaryTitle(options: {
 	icon: string;
 	label: string;
 	accent: Rgb;
 	meta?: string;
 	elapsedMs?: number;
+	/** 是否显示时钟耗时（分支摘要没有可信计时，改成显示摘要大小）。 */
+	withTimer?: boolean;
 }): string {
 	const meta = options.meta === undefined ? "" : ` · ${options.meta}`;
 	const timer =
-		options.elapsedMs === undefined
+		options.withTimer === false
 			? ""
-			: ` · ${ICON_CLOCK} ${(options.elapsedMs / 1000).toFixed(1)}s`;
+			: ` · ${ICON_CLOCK} ${options.elapsedMs === undefined ? "--" : formatPanelDuration(options.elapsedMs)}`;
 	return (
 		`${sgr(options.accent)}${BOLD_ON}${options.icon} ${options.label}${meta}${timer}` +
 		`${BOLD_OFF}${RESET_FG}`
@@ -185,6 +232,8 @@ export class SummaryBlockView extends CachedView {
 interface SummaryPrototype {
 	expanded: boolean;
 	message?: unknown;
+	/** pi 给每条会话条目分配的 id（用来对上本地测到的压缩结果）。 */
+	messageId?: string;
 	clear(): void;
 	addChild(component: Component): void;
 	setBgFn(bgFn?: (text: string) => string): void;
@@ -198,7 +247,7 @@ interface SummaryPrototype {
 function patchSummaryComponent(
 	proto: SummaryPrototype,
 	prefix: string,
-	buildTitle: (message: SummaryMessageLike) => string,
+	buildTitle: (message: SummaryMessageLike, messageId: string | undefined) => string,
 ): void {
 	const originalUpdateDisplay = proto.updateDisplay;
 	const patched = function (this: SummaryPrototype): void {
@@ -212,7 +261,7 @@ function patchSummaryComponent(
 			this.addChild(
 				new MouseRegion(
 					new SummaryBlockView(
-						buildTitle(message),
+						buildTitle(message, this.messageId),
 						summary,
 						this.expanded === true,
 					) as unknown as Component,
@@ -231,34 +280,63 @@ function patchSummaryComponent(
 	patchPrototypeSlots(proto, prefix, { updateDisplay: patched as unknown as () => void });
 }
 
-/** 压缩块的标题（含"压缩前 N tokens"与本机测到的耗时）。 */
-export function compactionTitle(message: SummaryMessageLike, now = Date.now()): string {
-	const tokens = typeof message.tokensBefore === "number" ? message.tokensBefore : undefined;
-	// 只有"刚刚压缩完"才显示本地耗时；历史回放没有可信计时，不伪造。
-	const elapsedMs =
-		lastCompaction !== undefined && now - lastCompaction.endedAt < 5_000
-			? lastCompaction.elapsedMs
-			: undefined;
+/**
+ * 压缩块的标题。
+ *
+ * 有本地记录时显示「压缩前 → 压缩后（降幅）」，没有就只写压缩前大小
+ * （`tokensBefore` 是 pi 落盘的，历史回放也有）。
+ */
+export function compactionTitle(
+	message: SummaryMessageLike,
+	record: CompactionRecord | undefined = lastCompaction,
+): string {
+	const before = typeof message.tokensBefore === "number" ? message.tokensBefore : undefined;
+	const after = record?.tokensAfter;
+	let meta: string | undefined;
+	if (before === undefined) {
+		meta = undefined;
+	} else if (after === undefined) {
+		meta = `压缩前 ${formatTokens(before)} tokens`;
+	} else {
+		const saved = before - after;
+		const percent = before > 0 ? Math.round((saved / before) * 100) : 0;
+		meta = `${formatTokens(before)} → ${formatTokens(after)} tokens（-${percent}%）`;
+	}
 	return summaryTitle({
 		icon: ICON_COMPACTION,
 		label: "压缩完成",
 		accent: COMPACTION_ACCENT,
-		meta: tokens === undefined ? undefined : `压缩前 ${formatTokens(tokens)} tokens`,
-		elapsedMs,
+		meta,
+		elapsedMs: record?.elapsedMs,
 	});
 }
 
-/** 分支摘要块的标题（带来源条目的短 id）。 */
+/**
+ * 分支摘要块的标题：`\uF4CA 分支摘要 · from 3c9c3f06 · 摘要 1.2k tokens`。
+ *
+ * 分支摘要**不显示时钟**：它没有可信计时（既没有本地事件可测，条目里也没有耗时），
+ * 与其显示一个 `--`，不如显示更有用的信息——摘要本身多大。
+ */
 export function branchTitle(message: SummaryMessageLike): string {
 	const from =
 		typeof message.fromId === "string" && message.fromId.length > 0
 			? message.fromId.slice(0, 8)
 			: undefined;
+	const summary = typeof message.summary === "string" ? message.summary : "";
+	// 注意：pi-ai 的 estimateTokens 对 assistant 只认 **block 数组**的 content
+	// （传字符串会得到 0），所以这里显式包成 text 块。
+	const tokens = summary.trim()
+		? estimateTokens({ role: "assistant", content: [{ type: "text", text: summary }] } as never)
+		: undefined;
+	const parts: string[] = [];
+	if (from !== undefined) parts.push(`from ${from}`);
+	if (tokens !== undefined) parts.push(`摘要 ${formatTokens(tokens)} tokens`);
 	return summaryTitle({
 		icon: ICON_BRANCH,
 		label: "分支摘要",
 		accent: BRANCH_ACCENT,
-		meta: from === undefined ? undefined : `from ${from}`,
+		meta: parts.length > 0 ? parts.join(" · ") : undefined,
+		withTimer: false,
 	});
 }
 
@@ -267,7 +345,7 @@ export function patchSummaryBlocks(): void {
 	patchSummaryComponent(
 		CompactionSummaryMessageComponent.prototype as unknown as SummaryPrototype,
 		"ui-style:compaction-summary",
-		(message) => compactionTitle(message),
+		(message, messageId) => compactionTitle(message, compactionRecord(messageId)),
 	);
 	patchSummaryComponent(
 		BranchSummaryMessageComponent.prototype as unknown as SummaryPrototype,
@@ -290,62 +368,154 @@ export function unpatchSummaryBlocks(): void {
 	);
 }
 
-// ---- 压缩中：同款标题的指示（widget，不占 transcript） ----------------------
+// ---- 压缩中：同款标题 + 5 行窗口（显示"正在被压缩的原文"） ------------------
 
 const INDICATOR_WIDGET_KEY = "ui-style-compaction-indicator";
 
-/** 压缩中指示视图：标题（扫光 + 耗时）+ 一行提示。 */
+/** 从待压缩消息里抽纯文本（给"原文窗口"用）。 */
+export function textsFromPreparation(preparation: unknown): string {
+	const prep = preparation as
+		| { messagesToSummarize?: unknown[]; turnPrefixMessages?: unknown[] }
+		| undefined;
+	const messages = [
+		...(Array.isArray(prep?.messagesToSummarize) ? prep.messagesToSummarize : []),
+		...(Array.isArray(prep?.turnPrefixMessages) ? prep.turnPrefixMessages : []),
+	];
+	const parts: string[] = [];
+	for (const message of messages) {
+		const content = (message as { content?: unknown })?.content;
+		if (typeof content === "string") {
+			parts.push(content);
+			continue;
+		}
+		if (!Array.isArray(content)) continue;
+		for (const block of content) {
+			const part = block as { type?: string; text?: string };
+			if (part?.type === "text" && typeof part.text === "string") parts.push(part.text);
+		}
+	}
+	return parts.join("\n");
+}
+
+/**
+ * 压缩中指示视图：标题（扫光 + 耗时）+ **固定 5 行窗口**显示被压缩的原文尾部。
+ *
+ * pi 不暴露压缩过程生成的摘要流，但 `session_before_compact` 会给出
+ * `preparation.messagesToSummarize`——那正是"正在被压缩的原文"，用它填窗口，
+ * 用户至少能看见"哪些内容正在被压缩"。
+ */
 export class CompactionIndicatorView extends CachedView {
 	private readonly clock: BlockClock;
+	private readonly source: string;
 
-	constructor(clock: BlockClock) {
+	constructor(clock: BlockClock, source = "") {
 		super();
 		this.clock = clock;
+		this.source = source;
 	}
 
 	protected override cacheKey(): string {
 		// 扫光与耗时按 100ms 粒度变化；压缩期间 pi 的 spinner 会持续给帧。
-		return `${this.clock.startedAt ?? 0}:${Math.floor(Date.now() / 100)}`;
+		return `${this.clock.startedAt ?? 0}:${Math.floor(Date.now() / 100)}:${this.source.length}`;
 	}
 
 	protected renderLines(width: number): string[] {
 		const plain = `${ICON_COMPACTION} 压缩中`;
 		const title = `${BOLD_ON}${shimmerText(plain, COMPACTION_ACCENT, this.clock.startedAt)}${BOLD_OFF}${RESET_FG}`;
-		const lines = [
-			`${UI_INDENT}${title}`,
-			`${UI_INDENT}${PREVIEW_CONNECTOR_FIRST}${WARN_YELLOW}正在生成摘要…${RESET_FG}`,
-		];
+		const lines = [`${UI_INDENT}${title}`];
+
+		const contentWidth = Math.max(1, width - UI_INDENT.length - PREVIEW_CONNECTOR_REST.length);
+		const text = normalizeNewlines(this.source).trim();
+		if (!text) {
+			lines.push(`${UI_INDENT}${PREVIEW_CONNECTOR_FIRST}${WARN_YELLOW}正在生成摘要…${RESET_FG}`);
+			return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
+		}
+
+		// 原文是静态的（一次给全），但窗口按时间**自动下滚**：观感上像流式输出。
+		const sourceLines = text.split("\n");
+		const maxOffset = Math.max(0, sourceLines.length - SUMMARY_WINDOW_LINES);
+		const elapsed = this.clock.startedAt === undefined ? 0 : Date.now() - this.clock.startedAt;
+		const offset = Math.min(maxOffset, Math.floor(Math.max(0, elapsed) / SUMMARY_SCROLL_MS));
+		const windowLines = sourceLines.slice(offset, offset + SUMMARY_WINDOW_LINES);
+
+		let first = true;
+		const above = offset;
+		if (above > 0) {
+			lines.push(`${UI_INDENT}${PREVIEW_CONNECTOR_FIRST}${MUTED}… 上面还有 ${above} 行${RESET_FG}`);
+			first = false;
+		}
+		for (const row of windowLines) {
+			const prefix = first ? PREVIEW_CONNECTOR_FIRST : PREVIEW_CONNECTOR_REST;
+			lines.push(`${UI_INDENT}${prefix}${row}`);
+			first = false;
+		}
+		const below = maxOffset - offset;
+		if (below > 0) {
+			lines.push(`${UI_INDENT}${PREVIEW_CONNECTOR_REST}${MUTED}… 下面还有 ${below} 行${RESET_FG}`);
+		}
 		return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
 	}
 }
 
 /**
- * 压缩中指示：`session_before_compact` 起表、`session_compact` /
- * `session_compact_failed` 收表；指示挂在输入框上方（widget，不进 transcript）。
+ * 压缩中指示：`session_before_compact` 起表（并记下待压缩原文），
+ * `session_compact` / `session_compact_failed` 收表。
+ *
+ * 收表时顺带记下**耗时**与**压缩后大小**（用 pi 的 `estimateTokens` 对压缩后的
+ * 会话投影求和，口径与 pi 内部一致），供紧随其后的摘要块显示。
  */
 export function setupCompactionIndicator(pi: ExtensionAPI): void {
 	const clock: BlockClock = {};
+	let source = "";
 
-	pi.on("session_before_compact", (_event, ctx) => {
+	pi.on("session_before_compact", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		clock.startedAt = Date.now();
 		clock.endedAt = undefined;
-		const view = new CompactionIndicatorView(clock);
-		ctx.ui.setWidget(INDICATOR_WIDGET_KEY, () => view, { placement: "aboveEditor" });
+		source = textsFromPreparation((event as { preparation?: unknown }).preparation);
+		ctx.ui.setWidget(INDICATOR_WIDGET_KEY, () => new CompactionIndicatorView(clock, source), {
+			placement: "aboveEditor",
+		});
 	});
 
-	const finish = (ctx: { ui: { setWidget(key: string, view: undefined): void } }, failed: boolean): void => {
-		if (clock.startedAt !== undefined && clock.endedAt === undefined) {
+	const finish = (
+		event: { compactionEntry?: { id?: string } },
+		ctx: {
+			ui: { setWidget(key: string, view: undefined): void };
+			sessionManager?: { buildSessionProjection(): { messages: unknown[] } };
+		},
+		failed: boolean,
+	): void => {
+		const startedAt = clock.startedAt;
+		if (startedAt !== undefined && clock.endedAt === undefined) {
 			clock.endedAt = Date.now();
-			if (!failed) recordCompactionTiming(clock.endedAt - clock.startedAt);
+			if (!failed) {
+				// 压缩后的上下文大小：与 pi 内部同一套估算（estimateTokens 逐条求和）。
+				let tokensAfter: number | undefined;
+				try {
+					const projection = ctx.sessionManager?.buildSessionProjection();
+					if (projection !== undefined) {
+						tokensAfter = projection.messages.reduce(
+							(sum, message) => sum + estimateTokens(message as never),
+							0,
+						);
+					}
+				} catch {
+					// 拿不到就不显示"压缩后"，只显示压缩前。
+				}
+				recordCompactionResult(
+					{ elapsedMs: clock.endedAt - startedAt, tokensAfter },
+					event.compactionEntry?.id,
+				);
+			}
 		}
 		ctx.ui.setWidget(INDICATOR_WIDGET_KEY, undefined);
 	};
 
-	pi.on("session_compact", (_event, ctx) => finish(ctx, false));
-	pi.on("session_compact_failed", (_event, ctx) => finish(ctx, true));
+	pi.on("session_compact", (event, ctx) => finish(event as never, ctx as never, false));
+	pi.on("session_compact_failed", (event, ctx) => finish(event as never, ctx as never, true));
 	pi.on("session_shutdown", (_event, ctx) => {
-		finish(ctx, true);
+		finish({}, ctx as never, true);
 		resetCompactionTiming();
 	});
 }

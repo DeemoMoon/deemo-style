@@ -3032,6 +3032,13 @@ test("摘要块：图标 / 标题 / 固定 5 行窗口 / 展开全文 / 无背�
 		assert.ok(branchText.includes(ICON_BRANCH), `应有分支图标：\n${branchText}`);
 		assert.match(branchText, /分支摘要/);
 		assert.match(branchText, /from a1b2c3d4/, "应带来源短 id");
+		// 分支摘要不显示时钟，改成显示摘要大小
+		const { ICON_CLOCK } = await import("../core.ts");
+		assert.ok(!branchText.includes(ICON_CLOCK), `分支摘要不该有时钟：\n${branchText}`);
+		assert.doesNotMatch(branchText, /--/, `分支摘要不该有 -- 占位：\n${branchText}`);
+		assert.match(branchText, /摘要 \d+k? tokens/, `应显示摘要大小：\n${branchText}`);
+		// 不能是 0：pi-ai 的 estimateTokens 对 assistant 只认 block 数组，传字符串会算成 0
+		assert.doesNotMatch(branchText, /摘要 0 tokens/, `摘要大小不该算成 0：\n${branchText}`);
 		assert.ok(!branchText.includes("[branch]"), "不该再有默认标签");
 	} finally {
 		unpatchSummaryBlocks();
@@ -3096,4 +3103,111 @@ test("压缩中指示：session_before_compact 起表、session_compact 收表",
 	(handlers.get("session_before_compact") ?? []).at(-1)({ type: "session_before_compact" }, ctx);
 	(handlers.get("session_compact") ?? []).at(-1)({ type: "session_compact" }, ctx);
 	assert.equal(widgets.length, 2, "起表/收表各应操作一次 widget");
+});
+
+test("摘要块：标题始终有时钟（未测到耗时显示 --），压缩完成显示前后对比", async () => {
+	const {
+		patchSummaryBlocks,
+		unpatchSummaryBlocks,
+		recordCompactionResult,
+		resetCompactionTiming,
+		compactionTitle,
+	} = await import("../summary-blocks.ts");
+	const { ICON_CLOCK } = await import("../core.ts");
+
+	// ① 没有本地记录（历史回放）：时钟在，但耗时是 --
+	resetCompactionTiming();
+	const historic = strip(compactionTitle({ tokensBefore: 12345 }, undefined));
+	assert.ok(historic.includes(ICON_CLOCK), `标题应有时钟图标：${historic}`);
+	assert.match(historic, /压缩前 12k tokens/, `应显示压缩前大小：${historic}`);
+	assert.match(historic, /--/, `没有测到耗时应显示 --：${historic}`);
+
+	// ② 有本地记录：显示 耗时 + 压缩前→压缩后（降幅）
+	resetCompactionTiming();
+	recordCompactionResult({ elapsedMs: 1800, tokensAfter: 4000 }, "entry-1");
+	const live = strip(compactionTitle({ tokensBefore: 12345 }, undefined));
+	assert.match(live, /1\.8s/, `应显示耗时：${live}`);
+	assert.match(live, /12k → 4k tokens/, `应显示前后对比：${live}`);
+	assert.match(live, /-68%/, `应显示降幅：${live}`);
+
+	// ③ 组件层：覆盖 messageId 时也能取到记录
+	patchSummaryBlocks();
+	try {
+		const comp = new piMain.CompactionSummaryMessageComponent(
+			{ role: "compactionSummary", summary: "摘要内容", tokensBefore: 12345, timestamp: Date.now() },
+			undefined,
+			1,
+			[],
+			"entry-1",
+			Date.now(),
+		);
+		const text = strip(comp.render(100).join("\n"));
+		assert.match(text, /1\.8s/, `组件应显示耗时：\n${text}`);
+		assert.match(text, /12k → 4k tokens/, `组件应显示前后对比：\n${text}`);
+	} finally {
+		unpatchSummaryBlocks();
+		resetCompactionTiming();
+	}
+});
+
+test("压缩中指示：5 行窗口按时间自动下滚（流式观感）", async () => {
+	const {
+		CompactionIndicatorView,
+		textsFromPreparation,
+		ICON_COMPACTION,
+		SUMMARY_WINDOW_LINES,
+		SUMMARY_SCROLL_MS,
+	} = await import("../summary-blocks.ts");
+
+	// 从 preparation 抽文本（只看 text 块，忽略工具调用）
+	const source = textsFromPreparation({
+		messagesToSummarize: [
+			{ role: "user", content: "第一段用户输入" },
+			{ role: "assistant", content: [{ type: "text", text: "助手回答" }, { type: "toolCall", name: "read" }] },
+		],
+		turnPrefixMessages: [{ role: "user", content: "最后一段" }],
+	});
+	assert.equal(source, "第一段用户输入\n助手回答\n最后一段");
+
+	const lines12 = Array.from({ length: 12 }, (_, i) => `原文第 ${i + 1} 行`).join("\n");
+	const realNow = Date.now;
+	try {
+		const renderAt = (elapsedMs) => {
+			Date.now = () => 10_000_000 + elapsedMs;
+			const view = new CompactionIndicatorView({ startedAt: 10_000_000 }, lines12);
+			return view.render(80).map(strip);
+		};
+
+		// ① 起始：看头部 5 行 + 「下面还有 7 行」
+		const head = renderAt(0);
+		assert.ok(head[0].includes(ICON_COMPACTION), `标题应有压缩图标：${head[0]}`);
+		assert.match(head[0], /压缩中/);
+		const headBody = head.slice(1).join("\n");
+		assert.ok(headBody.includes("原文第 1 行"), `起始应从头显示：\n${headBody}`);
+		assert.equal((headBody.match(/原文第 \d+ 行/g) ?? []).length, SUMMARY_WINDOW_LINES, `窗口应固定 ${SUMMARY_WINDOW_LINES} 行`);
+		assert.match(headBody, /下面还有 7 行/);
+
+		// ② 过一段时间：窗口下滚（起始行变了）
+		const scrolled = renderAt(SUMMARY_SCROLL_MS * 3);
+		const scrolledBody = scrolled.slice(1).join("\n");
+		assert.ok(scrolledBody.includes("原文第 4 行"), `应滚动到第 4 行起：\n${scrolledBody}`);
+		assert.ok(!scrolledBody.includes("原文第 1 行"), "第 1 行应已滚出窗口");
+		assert.match(scrolledBody, /上面还有 3 行/);
+
+		// ③ 滚到底：停在尾部，只提示上面还有内容
+		const tail = renderAt(SUMMARY_SCROLL_MS * 100);
+		const tailBody = tail.slice(1).join("\n");
+		assert.ok(tailBody.includes("原文第 12 行"), `滚到底应显示最后一行：\n${tailBody}`);
+		assert.match(tailBody, /上面还有 \d+ 行/);
+		assert.doesNotMatch(tailBody, /下面还有/, "到底后不该还有「下面还有」");
+		// 任何时候窗口都不超过 5 行原文
+		for (const body of [headBody, scrolledBody, tailBody]) {
+			assert.ok(
+				(body.match(/原文第 \d+ 行/g) ?? []).length <= SUMMARY_WINDOW_LINES,
+				`原文窗口不应超过 ${SUMMARY_WINDOW_LINES} 行：\n${body}`,
+			);
+		}
+	} finally {
+		Date.now = realNow;
+	}
 });

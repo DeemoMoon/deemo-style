@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.3.3] - 2026-11-19
+
+### 摘要块：耗时、滚动原文、前后对比
+- **压缩块标题始终带时钟**：测到就显示真实耗时，历史回放显示 `--`（pi 的
+  `CompactionEntry` 不落盘耗时，只能在本进程内用 `session_before_compact` /
+  `session_compact` 现场测并**按 entry id** 记录）。
+- **压缩完成显示前后大小对比**：`12k → 4.1k tokens（-67%）`。压缩前取
+  `tokensBefore`；压缩后用 pi 的 `estimateTokens` 对压缩后的会话投影求和
+  （与 pi 内部 `estimatedTokensAfter` 同口径），拿不到就只显示压缩前。
+- **压缩中的 5 行窗口自动下滚**：原文来自 `preparation.messagesToSummarize`，
+  窗口每 350ms 下滚一行（`SUMMARY_SCROLL_MS`），滚到底停在尾部；上下都有
+  `… 上面还有 N 行` / `… 下面还有 N 行` 提示且不占窗口额度。
+- **分支摘要去掉时钟**，改成显示摘要大小：`\uF4CA 分支摘要 · from 3c9c3f06 · 摘要 13 tokens`。
+  注意 pi-ai 的 `estimateTokens` 对 assistant 只认 block 数组的 content
+  （传字符串会得 0），已显式包成 text 块并加测试防止回归。
+
 ## [1.3.2] - 2026-11-19
 
 ### 新功能：压缩摘要 / 分支摘要块统一视觉
