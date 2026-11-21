@@ -184,7 +184,7 @@ export const RESET_FG = "\x1b[39m";
 
 /** 工具面板与各处状态色（24-bit）。 */
 export const ACCENT_BLUE: Rgb = [95, 135, 215]; // bash / powershell / 技能横幅
-export const ACCENT_CYAN: Rgb = [95, 215, 215]; // read
+export const ACCENT_CYAN: Rgb = [95, 215, 215]; // read / web（都是"读外部内容"）
 export const ACCENT_GREEN: Rgb = [95, 191, 127]; // write / ls / `!` 命令框
 export const ACCENT_VIOLET: Rgb = [177, 142, 250]; // edit / grep / find
 /** 状态档位色（ctx 色条 / diff / 错误 / 警告）。 */
@@ -292,6 +292,7 @@ export const ICON_READ = "\uDB80\uDE1E"; // Plane 15，代理对
 export const ICON_WRITE = "\uEE3C";
 export const ICON_EDIT = "\uDB83\uDDC9"; // Plane 15，代理对
 export const ICON_SEARCH = "\uEBC4"; // grep/find/powershell/ls/`!` 命令
+export const ICON_WEB = "\uDB81\uDF0F"; // Plane 15，代理对：web_search/web_fetch
 export const ICON_CLOCK = "\uE382"; // 各面板与思考块的耗时
 export const ICON_THINKING = "\uEC59"; // 思考块
 export const ICON_SKILL = "\uE947"; // 技能横幅

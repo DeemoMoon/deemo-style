@@ -3788,3 +3788,101 @@ test("子代理结果弹窗：结论按 markdown 渲染（语法符号被消费�
 	const widths = new Set(lines.map((line) => visibleWidth(line)));
 	assert.equal(widths.size, 1, `每行宽度应一致：${[...widths].join(",")}`);
 });
+
+test("web_search 面板：图标+标题+时钟、第二行 query、完成后 4 行窗口", () => {
+	const panel = resolvePanel("web_search", () => undefined);
+	assert.ok(panel, "web_search 应有专用面板");
+
+	// ① 运行中：标题行 + 查询词行；有查询词就不再打“执行中...”
+	const running = panelContext({
+		args: { query: "DeepSeek V4 site:github.com" },
+		state: { startedAt: Date.now() - 1234 },
+		isPartial: true,
+	});
+	const callLines = panel.renderCall(running.args, theme, running).render(80).map(strip);
+	assert.equal(callLines.length, 2, `应是两行（标题 + query），实际 ${callLines.length} 行\n${callLines.join("\n")}`);
+	assert.match(callLines[0], /搜索/, "标题应含「搜索」");
+	assert.match(callLines[0], /1\.2s|1\.3s/, `标题应含耗时：${callLines[0]}`);
+	assert.ok(!callLines[0].includes("执行中"), "有 query 后不该再有“执行中”占位");
+	assert.match(callLines[1], /⎿\s+DeepSeek V4 site:github\.com/, "第二行应是 ⎿ + 查询词");
+
+	// ② 完成态：4 行窗口，取头部（相关性最高的排在最前）
+	const text = [
+		"搜索“q” · 3 条结果（按相关性排序）",
+		"1. 第一条",
+		"   https://example.com/a",
+		"   站点 · 权威 4",
+		"2. 第二条",
+		"   https://example.com/b",
+	].join("\n");
+	const done = panelContext({ args: { query: "q" }, state: { startedAt: 1000, endedAt: 2000 } });
+	const body = panel
+		.renderResult({ content: [{ type: "text", text }] }, { expanded: false, isPartial: false }, theme, done)
+		.render(80)
+		.map(strip);
+	assert.equal(body.length, 4, `窗口应恒定为 4 行，实际 ${body.length} 行\n${body.join("\n")}`);
+	assert.match(body[0] ?? "", /3 条结果/, "头部第一行是结果概览");
+	assert.match(body[2] ?? "", /https:\/\/example\.com\/a/, `应看到第 1 条的 URL：\n${body.join("\n")}`);
+	assert.ok(!body.join("\n").includes("example.com/b"), "第 2 条不该挤进 4 行窗口");
+	// 窗口行不再叠一层 ⎿（查询词已经用掉一个）
+	assert.ok(!body.join("\n").includes("⎿"), `窗口内不该再出现 ⎿：\n${body.join("\n")}`);
+
+	// ③ 标题的 “· N 行” 在结果渲染后出现（N = 结果正文的源行数，与其它面板口径一致）
+	const header = panel.renderCall(done.args, theme, done).render(80).map(strip)[0] ?? "";
+	assert.match(header, /· 6 行/, `完成后标题应带行数：${header}`);
+});
+
+test("web_search 面板：运行中取尾部滚动、展开显示全部、空结果与失败各有占位", () => {
+	const panel = resolvePanel("web_search", () => undefined);
+
+	// ① 运行中 partial：窗口跟着滚（显示最后 4 行）
+	const streaming = panelContext({
+		args: { query: "q" },
+		state: { startedAt: Date.now() - 500 },
+		isPartial: true,
+	});
+	const partialText = ["搜索“q” · 6 条", "1. A", "2. B", "3. C", "4. D", "5. E", "6. F"].join("\n");
+	const live = panel
+		.renderResult({ content: [{ type: "text", text: partialText }] }, { expanded: false, isPartial: true }, theme, streaming)
+		.render(80)
+		.map(strip);
+	assert.equal(live.length, 4, `窗口恒 4 行，实际 ${live.length}`);
+	assert.match(live.join("\n"), /6\. F/, "运行中应显示最新的（尾部）内容");
+	assert.ok(!live.join("\n").includes("1. A"), "运行中不显示最早的条目");
+
+	// ② 展开：全部内容，首行带 ⎿
+	const expanded = panel
+		.renderResult({ content: [{ type: "text", text: partialText }] }, { expanded: true, isPartial: false }, theme, streaming)
+		.render(80)
+		.map(strip);
+	assert.equal(expanded.length, 7, `展开应显示全部 7 行，实际 ${expanded.length}`);
+	assert.match(expanded[0] ?? "", /⎿/, "展开态首行带连接符");
+	assert.match(expanded.join("\n"), /6\. F/, "展开态包含最后一行");
+
+	// ③ 空结果
+	const empty = panel
+		.renderResult({ content: [{ type: "text", text: "  " }] }, { expanded: false, isPartial: false }, theme, panelContext({ args: { query: "q" } }))
+		.render(80)
+		.map(strip)
+		.join("\n");
+	assert.match(empty, /\(无结果\)/);
+
+	// ④ 失败：显示错误文本
+	const failed = panel
+		.renderResult(
+			{ content: [{ type: "text", text: "DeepSeek API Key 无效" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			panelContext({ args: { query: "q" }, isError: true }),
+		)
+		.render(80)
+		.map(strip)
+		.join("\n");
+	assert.match(failed, /API Key 无效/);
+
+	// ⑤ 窄终端 / 超长查询词不超宽
+	const narrowCtx = panelContext({ args: { query: "很长的查询词".repeat(10) }, state: { startedAt: 1, endedAt: 2 } });
+	for (const line of panel.renderCall(narrowCtx.args, theme, narrowCtx).render(20)) {
+		assert.ok(visibleWidth(line) <= 20, `不应超宽：${visibleWidth(line)} 列`);
+	}
+});

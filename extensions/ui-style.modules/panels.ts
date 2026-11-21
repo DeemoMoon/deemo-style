@@ -36,6 +36,7 @@ import {
 	ICON_EDIT,
 	ICON_READ,
 	ICON_SEARCH,
+	ICON_WEB,
 	ICON_WRITE,
 	IndentedPreviewView,
 	LiveTailView,
@@ -43,6 +44,8 @@ import {
 	newWindowSnapshot,
 	normalizeNewlines,
 	PREVIEW_CONNECTOR_FIRST,
+	PREVIEW_CONNECTOR_REST,
+	PREVIEW_CONNECTOR_WIDTH,
 	RESET_FG,
 	resultOutput,
 	runningLine,
@@ -72,6 +75,13 @@ import {
 
 /** 工具框的内容高度（行）：运行中看过程、完成后看尾部，都不超过这个数。 */
 const LIVE_PANEL_LINES = 3;
+/**
+ * web_search 的结果窗口行数。
+ *
+ * 比其它工具多给一行：搜索结果是一份"清单"（标题 + URL + 元信息 + 摘要），
+ * 3 行连第一条都看不完整；4 行刚好能看到「标题 + URL + 元信息」。
+ */
+const SEARCH_WINDOW_LINES = 4;
 /**
  * 标题行是否带 “· N 行”。
  * 想严格只留「图标 + 标题 + 时钟 + 耗时」就把这里改成 false。
@@ -394,6 +404,8 @@ const PANEL_SPECS: Record<string, PanelHeaderSpec> = {
 	find: { icon: ICON_SEARCH, label: "Find", accent: ACCENT_VIOLET, showClock: true },
 	powershell: { icon: ICON_SEARCH, label: "PowerShell", accent: ACCENT_BLUE, showClock: true },
 	ls: { icon: ICON_SEARCH, label: "Ls", accent: ACCENT_GREEN, showClock: false },
+	// 网络搜索：与「读取」同色系（都是读外部内容），图标是 🌐 类的网络球。
+	web_search: { icon: ICON_WEB, label: "搜索", accent: ACCENT_CYAN, showClock: true },
 };
 
 /** ls 展开态的上限：目录可能有几千项，整段塞进 transcript 会让每帧重绘变慢。 */
@@ -797,7 +809,136 @@ const SPECIAL_PANELS: Record<string, (spec: PanelHeaderSpec) => ToolPanelRendere
 	write: writePanel,
 	edit: editPanel,
 	ls: (spec) => simplePanel(spec, lsView),
+	web_search: webSearchPanel,
 };
+
+// ---- web_search：标题 + 查询词 + 4 行结果窗口 --------------------------------
+
+/**
+ * 标题下方的查询词行：`⎿ query`。
+ *
+ * 为什么不把 query 塞进标题：`site:… lang:… after:…` 这类语法能让 query 很长，
+ * 塞标题会把耗时挤出屏幕；而单独一行跟单 agent 块的「标题 → ⎿ 任务」结构一致。
+ */
+class QueryLineView extends CachedView {
+	private readonly query: string;
+	private readonly theme: ThemeLike;
+
+	constructor(query: string, theme: ThemeLike) {
+		super();
+		this.query = query;
+		this.theme = theme;
+	}
+
+	protected renderLines(width: number): string[] {
+		const avail = Math.max(1, width - UI_INDENT_WIDTH - PREVIEW_CONNECTOR_WIDTH);
+		const text = truncateToWidth(this.theme.fg("text", this.query), avail, "…");
+		return [`${UI_INDENT}${PREVIEW_CONNECTOR_FIRST}${text}`];
+	}
+}
+
+/**
+ * 搜索结果的 4 行窗口。
+ *
+ * 与其它工具面板的尾窗（`LiveTailView`）差别：搜索结果是**按相关性排序的清单**，
+ * 头部才是要看的（尾窗只会露出最后一条摘要的尾巴）。所以：
+ *   - 运行中（有 partial 输出）→ 取尾部，滚动感与其它工具一致；
+ *   - 完成后 → 取头部，先看到最相关的结果。
+ * 高度恒定为 SEARCH_WINDOW_LINES：transcript 不抖、也不跳屏。
+ */
+class SearchWindowView extends CachedView {
+	private readonly sourceLines: readonly string[];
+	/** 运行中取尾部（滚动），完成后取头部（相关性最高的在前）。 */
+	private readonly tail: boolean;
+	private readonly isError: boolean;
+	private readonly theme: ThemeLike;
+
+	constructor(
+		sourceLines: readonly string[],
+		tail: boolean,
+		isError: boolean,
+		theme: ThemeLike,
+	) {
+		super();
+		this.sourceLines = sourceLines;
+		this.tail = tail;
+		this.isError = isError;
+		this.theme = theme;
+	}
+
+	protected renderLines(width: number): string[] {
+		const contentWidth = Math.max(1, width - UI_INDENT_WIDTH - PREVIEW_CONNECTOR_WIDTH);
+		const style = this.isError
+			? (line: string) => this.theme.fg("error", line)
+			: (line: string) => this.theme.fg("text", line);
+
+		const rows: string[] = [];
+		for (const line of this.sourceLines) {
+			if (line === "") {
+				rows.push("");
+				continue;
+			}
+			rows.push(...wrapTextWithAnsi(style(line), contentWidth));
+			// 只要一个窗口的量：头部取前 N 行，尾部多留一屏余量（换行会改变行数）。
+			if (!this.tail && rows.length >= SEARCH_WINDOW_LINES) break;
+		}
+		const window = this.tail ? rows.slice(-SEARCH_WINDOW_LINES) : rows.slice(0, SEARCH_WINDOW_LINES);
+		// 第二行起没有 `⎿`：查询词已经用过一个，再套一个会出现两层连接符。
+		return window.map((row) => `${UI_INDENT}${PREVIEW_CONNECTOR_REST}${row}`);
+	}
+}
+
+/**
+ * web_search：`图标 搜索 · ⏱ 1.2s · N 行` / `⎿ query` / 4 行结果窗口。
+ *
+ * 展开（点击 / ctrl+o）走和其它工具一样的 `⎿` 全量预览。
+ */
+function webSearchPanel(spec: PanelHeaderSpec): ToolPanelRenderer {
+	return {
+		renderShell: "self" as const,
+
+		renderCall(args: unknown, theme: Theme, context: ToolRenderContextLike) {
+			const { state, getDuration } = usePanelClock(context);
+			const rawQuery = (args as { query?: unknown } | undefined)?.query;
+			const query = typeof rawQuery === "string" ? rawQuery.trim() : "";
+			// 有查询词了就别再打“执行中...”：标题在扫光、时钟在走，下面还有内容。
+			if (query !== "") state.liveOutput = true;
+			const header = panelHeader(spec, context, theme, getDuration, state);
+			return query === "" ? header : new EditCallView(header, new QueryLineView(query, theme));
+		},
+
+		renderResult(
+			result: ToolResultLike,
+			options: RenderResultOptionsLike,
+			theme: Theme,
+			context: ToolRenderContextLike,
+		) {
+			const state = getTimerState(context) as PanelState;
+			// 与其它面板一致：renderResult 不一定经过 renderCall 的 touchClock，这里兜底定格。
+			if (!options.isPartial && state.startedAt !== undefined) state.endedAt ??= Date.now();
+
+			const text = (options.isPartial ? liveOutputText(result) : resultOutput(result)).replace(/\n+$/u, "");
+			state.resultLines = text === "" ? 0 : text.split("\n").length;
+
+			if (text.trim() === "") {
+				state.liveOutput = false;
+				if (options.isPartial) return setText(context, "");
+				const label = context.isError ? "搜索失败" : "(无结果)";
+				return setText(
+					context,
+					`${UI_INDENT}${PREVIEW_CONNECTOR_FIRST}${theme.fg(context.isError ? "error" : "muted", label)}`,
+				);
+			}
+
+			state.liveOutput = true;
+			const lines = text.split("\n");
+			if (options.expanded) {
+				return new IndentedPreviewView(lines, true, context.isError, theme, { keyHint: context.keyHint });
+			}
+			return new SearchWindowView(lines, options.isPartial, context.isError, theme);
+		},
+	};
+}
 
 /** 工具名 → 面板工厂（特殊面板优先，其余按 PANEL_SPECS 自动生成）。 */
 const PANEL_FACTORIES: Record<string, () => ToolPanelRenderer> = Object.fromEntries(
