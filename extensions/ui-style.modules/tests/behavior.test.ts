@@ -4066,3 +4066,21 @@ test("pi 1.6 的 Container 缓存：patch 过的组件在真实容器里不漏�
 
 	exec.setComplete(0, false);
 });
+
+test("启动资源：目录形式的扩展名不带尾巴斜杠（subagent/index.ts → subagent）", async () => {
+	const startup = await jiti.import(fileURLToPath(new URL("../startup.ts", import.meta.url)));
+	const dir = mkdtempSync(join(tmpdir(), "ui-style-extname-"));
+	const extDir = join(dir, ".pi", "extensions");
+	mkdirSync(join(extDir, "subagent"), { recursive: true });
+	writeFileSync(join(extDir, "subagent", "index.ts"), "export default () => {};\n");
+	writeFileSync(join(extDir, "ui-style.ts"), "export default () => {};\n");
+
+	// 注意：扫描同时会读到真实的 ~/.pi/agent/extensions（那份里也有 subagent），
+	// 所以不断言精确列表，只断言"目录形式的扩展名不带斜杠"。
+	const scanned = await startup.collectSessionResources(dir, [], { force: true });
+	assert.ok(scanned.extensions.includes("subagent"), `应看到 subagent：${scanned.extensions.join(", ")}`);
+	assert.ok(
+		scanned.extensions.every((name) => !name.endsWith("/") && !name.includes("/")),
+		`扩展名应只是 basename，不带 /：${scanned.extensions.join(", ")}`,
+	);
+});

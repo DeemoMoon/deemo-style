@@ -530,13 +530,11 @@ async function collectSkills(cwd: string, settings: SettingsPair): Promise<Skill
 
 /**
  * 收集一个扩展目录里的扩展文件与扩展目录（与 pi 的发现规则一致，只看一层）。
- * 同时记录已经由 Dirent/stat 得到的类型，避免 collectExtensions 再全量 stat 一次。
+ *
+ * 不再回传"文件 / 目录"类型：显示名一律用 basename（见下方注释），
+ * 那个 Map 就成了纯开销。
  */
-async function collectExtensionFilesIn(
-	dir: string,
-	out: string[],
-	kinds: Map<string, PathKind>,
-): Promise<void> {
+async function collectExtensionFilesIn(dir: string, out: string[]): Promise<void> {
 	if ((await statKindAsync(dir)) !== "dir") return;
 
 	for (const entry of await readEntries(dir)) {
@@ -548,7 +546,6 @@ async function collectExtensionFilesIn(
 			for (const entryFile of EXTENSION_ENTRY_FILES) {
 				if ((await statKindAsync(join(full, entryFile))) === "file") {
 					out.push(full);
-					kinds.set(full, "dir");
 					break;
 				}
 			}
@@ -561,7 +558,6 @@ async function collectExtensionFilesIn(
 			!entry.name.endsWith(".d.ts")
 		) {
 			out.push(full);
-			kinds.set(full, "file");
 		}
 	}
 }
@@ -574,32 +570,27 @@ async function collectExtensions(
 	roots.push(...resolveConfiguredPaths(settings.user.extensions, agentDir()));
 	roots.push(...resolveConfiguredPaths(settings.project.extensions, join(cwd, ".pi")));
 
-	const files: string[] = [];
-	const knownKinds = new Map<string, PathKind>();
 	// 各 root 并行扫（root 之间没有共享状态，只有各自的局部数组），并发同样设上限。
+	const files: string[] = [];
 	const perRoot = await mapLimit(uniquePaths(roots), 8, async (root) => {
 		const found: string[] = [];
-		const kinds = new Map<string, PathKind>();
 		const kind = await statKindAsync(root);
 		if (kind === "dir") {
-			await collectExtensionFilesIn(root, found, kinds);
+			await collectExtensionFilesIn(root, found);
 		} else if (kind === "file") {
 			found.push(root);
-			kinds.set(root, "file");
 		}
-		return { found, kinds };
+		return found;
 	});
-	for (const { found, kinds } of perRoot) {
-		files.push(...found);
-		for (const [file, kind] of kinds) knownKinds.set(file, kind);
-	}
+	for (const found of perRoot) files.push(...found);
 
 	const unique = uniquePaths(files);
 
 	return unique
 		.map((file) => {
-			const isDirectory = knownKinds.get(file) === "dir";
-			const name = isDirectory ? `${basename(file)}/` : basename(file);
+			// 扩展名一律用 basename：pi 自己也不区分"单文件 / 目录（index.ts）"两种布局，
+			// 给目录加 `/` 只会让 `subagent/` 和 `ui-style.ts` 看起来像两类东西。
+			const name = basename(file);
 			const userEnabled = isEnabledByPatterns(
 				settings.user.extensions,
 				file,

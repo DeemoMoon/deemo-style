@@ -184,7 +184,7 @@ extensions/ui-style.modules/
   startup.ts        启动页
   info-panel.ts     会话信息面板（alt+i）
   reading.ts        长回复结束后跳回开头
-  tests/            153 个单测 + 行为测试
+  tests/            154 个单测 + 行为测试
 ```
 
 ## 测试

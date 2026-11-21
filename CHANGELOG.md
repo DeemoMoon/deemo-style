@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.26] - 2026-11-21
+
+### 启动页的扩展清单去掉目录尾巴斜杠
+- 之前目录形式的扩展（`extensions/subagent/index.ts`）显示成 `subagent/`，单文件形式
+  显示成 `ui-style.ts`；pi 自己并不区分这两种布局，这个尾巴只会让人以为写错了。
+  现在一律用 `basename`：`subagent`、`ui-style.ts`、`web-tools.ts`。
+- 顺带删掉 `collectExtensionFilesIn` 里维护"文件 / 目录"类型的 `Map`（只为那个
+  斜杠存在，现在成了纯开销）：少一层 Map 合并，扫描路径更直。
+- 新增一条用例（共 154）：目录形式的扩展名不带 `/`。
+
 ## [1.3.25] - 2026-11-21
 
 ### 适配 pi 1.6.0 的破坏性更新：render() 返回 readonly string[]
