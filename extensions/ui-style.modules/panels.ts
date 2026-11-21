@@ -170,6 +170,14 @@ export interface PanelHeaderSpec {
 	label: string;
 	accent: Rgb;
 	showClock: boolean;
+	/**
+	 * 运行中/完成后用不同标题（「搜索中」→「搜索结果」）。
+	 *
+	 * 为什么不用一个固定名字：搜索/抓取是少数"过程名和结果名本来就不一样"的工具，
+	 * `bash`/`read` 那种「工具名 + 耗时」就够了。回放的历史块（startedAt 缺失）
+	 * 一律按已完成显示，不会闪一下"XX中"。
+	 */
+	labelWhen?: { running: string; done: string };
 }
 
 /** 面板标题视图：图标 + 着色工具名 + 时钟 + 耗时；running 时附“执行中”行。 */
@@ -223,10 +231,23 @@ export class PanelHeaderView extends CachedView {
 			this.running ? 1 : 0,
 			this.running && this.state.liveOutput !== true ? 1 : 0,
 			this.animating ? 1 : 0,
+			this.currentLabel(),
 			this.currentDuration ?? "",
 			this.currentFrame,
 			this.lineCountText() ?? "",
 		].join("\u0000");
+	}
+
+	/**
+	 * 当前该显示哪个标题。
+	 *
+	 * `animating` = 块已出现且尚未结束（含参数流式阶段），比 `running`
+	 * （= isPartial && executionStarted）更贴近"标题在扫光"的那个时刻，两者保持一致。
+	 */
+	private currentLabel(): string {
+		const when = this.spec.labelWhen;
+		if (when === undefined) return this.spec.label;
+		return this.animating ? when.running : when.done;
 	}
 
 	/** 完成后的 “N 行”（运行中/无数据时不显示）。 */
@@ -243,7 +264,7 @@ export class PanelHeaderView extends CachedView {
 		// 整行一起扫光：亮带从图标一路扫到耗时，而不是只在工具名上跳。
 		const { clock, lines } = this.layout(width, duration);
 		const plain =
-			`${this.spec.icon} ${this.spec.label}` +
+			`${this.spec.icon} ${this.currentLabel()}` +
 			(clock !== undefined ? ` · ${ICON_CLOCK} ${clock}` : "") +
 			(lines !== undefined ? ` · ${lines}` : "");
 		const line = this.animating
@@ -265,7 +286,7 @@ export class PanelHeaderView extends CachedView {
 		duration: string | undefined,
 	): { clock: string | undefined; lines: string | undefined } {
 		const avail = Math.max(0, width - UI_INDENT_WIDTH);
-		const headWidth = visibleWidth(`${this.spec.icon} ${this.spec.label}`);
+		const headWidth = visibleWidth(`${this.spec.icon} ${this.currentLabel()}`);
 		const lineCount = this.lineCountText();
 
 		const variants: Array<{ clock: string | undefined; lines: string | undefined }> = [
@@ -404,8 +425,22 @@ const PANEL_SPECS: Record<string, PanelHeaderSpec> = {
 	find: { icon: ICON_SEARCH, label: "Find", accent: ACCENT_VIOLET, showClock: true },
 	powershell: { icon: ICON_SEARCH, label: "PowerShell", accent: ACCENT_BLUE, showClock: true },
 	ls: { icon: ICON_SEARCH, label: "Ls", accent: ACCENT_GREEN, showClock: false },
-	// 网络搜索：与「读取」同色系（都是读外部内容），图标是 🌐 类的网络球。
-	web_search: { icon: ICON_WEB, label: "搜索", accent: ACCENT_CYAN, showClock: true },
+	// 网络工具：与「读取」同色系（都是读外部内容）。
+	// 标题随状态变（"搜索中" → "搜索结果"），因为这两个工具的过程名和结果名本来就不一样。
+	web_search: {
+		icon: ICON_WEB,
+		label: "搜索",
+		labelWhen: { running: "搜索中", done: "搜索结果" },
+		accent: ACCENT_CYAN,
+		showClock: true,
+	},
+	web_fetch: {
+		icon: ICON_WEB,
+		label: "抓取",
+		labelWhen: { running: "抓取中", done: "抓取结果" },
+		accent: ACCENT_CYAN,
+		showClock: true,
+	},
 };
 
 /** ls 展开态的上限：目录可能有几千项，整段塞进 transcript 会让每帧重绘变慢。 */
@@ -809,39 +844,42 @@ const SPECIAL_PANELS: Record<string, (spec: PanelHeaderSpec) => ToolPanelRendere
 	write: writePanel,
 	edit: editPanel,
 	ls: (spec) => simplePanel(spec, lsView),
-	web_search: webSearchPanel,
+	web_search: (spec) =>
+		webToolPanel(spec, { argField: "query", emptyLabel: "(无结果)", failureLabel: "搜索失败" }),
+	web_fetch: (spec) =>
+		webToolPanel(spec, { argField: "url", emptyLabel: "(无内容)", failureLabel: "抓取失败" }),
 };
 
-// ---- web_search：标题 + 查询词 + 4 行结果窗口 --------------------------------
+// ---- web_search / web_fetch：标题 + 参数行 + 4 行结果窗口 ----------------
 
 /**
- * 标题下方的查询词行：`⎿ query`。
+ * 标题下方的参数行：`⎿ query` / `⎿ URL`。
  *
  * 为什么不把 query 塞进标题：`site:… lang:… after:…` 这类语法能让 query 很长，
  * 塞标题会把耗时挤出屏幕；而单独一行跟单 agent 块的「标题 → ⎿ 任务」结构一致。
  */
-class QueryLineView extends CachedView {
-	private readonly query: string;
+class ArgLineView extends CachedView {
+	private readonly text: string;
 	private readonly theme: ThemeLike;
 
-	constructor(query: string, theme: ThemeLike) {
+	constructor(text: string, theme: ThemeLike) {
 		super();
-		this.query = query;
+		this.text = text;
 		this.theme = theme;
 	}
 
 	protected renderLines(width: number): string[] {
 		const avail = Math.max(1, width - UI_INDENT_WIDTH - PREVIEW_CONNECTOR_WIDTH);
-		const text = truncateToWidth(this.theme.fg("text", this.query), avail, "…");
-		return [`${UI_INDENT}${PREVIEW_CONNECTOR_FIRST}${text}`];
+		const line = truncateToWidth(this.theme.fg("text", this.text), avail, "…");
+		return [`${UI_INDENT}${PREVIEW_CONNECTOR_FIRST}${line}`];
 	}
 }
 
 /**
- * 搜索结果的 4 行窗口。
+ * web 工具结果的 4 行窗口。
  *
- * 与其它工具面板的尾窗（`LiveTailView`）差别：搜索结果是**按相关性排序的清单**，
- * 头部才是要看的（尾窗只会露出最后一条摘要的尾巴）。所以：
+ * 与其它工具面板的尾窗（`LiveTailView`）差别：搜索结果是**按相关性排序的清单**、
+ * 抓取的网页正文则是"从头读起"，**头部**才是要看的（尾窗只会露出末尾的碎片）。所以：
  *   - 运行中（有 partial 输出）→ 取尾部，滚动感与其它工具一致；
  *   - 完成后 → 取头部，先看到最相关的结果。
  * 高度恒定为 SEARCH_WINDOW_LINES：transcript 不抖、也不跳屏。
@@ -893,18 +931,28 @@ class SearchWindowView extends CachedView {
  *
  * 展开（点击 / ctrl+o）走和其它工具一样的 `⎿` 全量预览。
  */
-function webSearchPanel(spec: PanelHeaderSpec): ToolPanelRenderer {
+function webToolPanel(
+	spec: PanelHeaderSpec,
+	config: {
+		/** 从工具参数里取哪一项显示在第二行（web_search → query，web_fetch → url）。 */
+		argField: "query" | "url";
+		/** 没内容时的占位文案（搜索是"无结果"，抓取是"无内容"）。 */
+		emptyLabel: string;
+		/** 失败时的标题文案（搜索失败 / 抓取失败）。 */
+		failureLabel: string;
+	},
+): ToolPanelRenderer {
 	return {
 		renderShell: "self" as const,
 
 		renderCall(args: unknown, theme: Theme, context: ToolRenderContextLike) {
 			const { state, getDuration } = usePanelClock(context);
-			const rawQuery = (args as { query?: unknown } | undefined)?.query;
-			const query = typeof rawQuery === "string" ? rawQuery.trim() : "";
-			// 有查询词了就别再打“执行中...”：标题在扫光、时钟在走，下面还有内容。
-			if (query !== "") state.liveOutput = true;
+			const raw = (args as Record<string, unknown> | undefined)?.[config.argField];
+			const arg = typeof raw === "string" ? raw.trim() : "";
+			// 已经有参数了就别再打“执行中...”：标题在扫光、时钟在走，下面还有内容。
+			if (arg !== "") state.liveOutput = true;
 			const header = panelHeader(spec, context, theme, getDuration, state);
-			return query === "" ? header : new EditCallView(header, new QueryLineView(query, theme));
+			return arg === "" ? header : new EditCallView(header, new ArgLineView(arg, theme));
 		},
 
 		renderResult(
@@ -923,7 +971,7 @@ function webSearchPanel(spec: PanelHeaderSpec): ToolPanelRenderer {
 			if (text.trim() === "") {
 				state.liveOutput = false;
 				if (options.isPartial) return setText(context, "");
-				const label = context.isError ? "搜索失败" : "(无结果)";
+				const label = context.isError ? config.failureLabel : config.emptyLabel;
 				return setText(
 					context,
 					`${UI_INDENT}${PREVIEW_CONNECTOR_FIRST}${theme.fg(context.isError ? "error" : "muted", label)}`,

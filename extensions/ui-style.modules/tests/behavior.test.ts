@@ -3801,7 +3801,7 @@ test("web_search 面板：图标+标题+时钟、第二行 query、完成后 4 �
 	});
 	const callLines = panel.renderCall(running.args, theme, running).render(80).map(strip);
 	assert.equal(callLines.length, 2, `应是两行（标题 + query），实际 ${callLines.length} 行\n${callLines.join("\n")}`);
-	assert.match(callLines[0], /搜索/, "标题应含「搜索」");
+	assert.match(callLines[0], /搜索中/, `运行中标题应是「搜索中」：${callLines[0]}`);
 	assert.match(callLines[0], /1\.2s|1\.3s/, `标题应含耗时：${callLines[0]}`);
 	assert.ok(!callLines[0].includes("执行中"), "有 query 后不该再有“执行中”占位");
 	assert.match(callLines[1], /⎿\s+DeepSeek V4 site:github\.com/, "第二行应是 ⎿ + 查询词");
@@ -3885,4 +3885,72 @@ test("web_search 面板：运行中取尾部滚动、展开显示全部、空结
 	for (const line of panel.renderCall(narrowCtx.args, theme, narrowCtx).render(20)) {
 		assert.ok(visibleWidth(line) <= 20, `不应超宽：${visibleWidth(line)} 列`);
 	}
+});
+
+test("标题随状态变：搜索中/搜索结果、抓取中/抓取结果（回放按已完成显示）", () => {
+	const label = (toolName, context) => strip(resolvePanel(toolName, () => undefined).renderCall(context.args, theme, context).render(80)[0] ?? "");
+
+	const running = (args, startedAgo) =>
+		panelContext({ args, state: { startedAt: Date.now() - startedAgo }, isPartial: true });
+	const finished = (args) => panelContext({ args, state: { startedAt: 1000, endedAt: 2200 } });
+
+	assert.match(label("web_search", running({ query: "q" }, 1200)), /搜索中/);
+	assert.match(label("web_search", finished({ query: "q" })), /搜索结果/);
+	assert.match(label("web_fetch", running({ url: "https://x.com" }, 800)), /抓取中/);
+	assert.match(label("web_fetch", finished({ url: "https://x.com" })), /抓取结果/);
+
+	// 历史回放：startedAt 缺失（既没开始也没结束）→ 按"已完成"显示，不会闪一下“XX中”
+	const replay = panelContext({ args: { query: "q" }, state: {}, isPartial: false });
+	assert.match(label("web_search", replay), /搜索结果/);
+
+	// 其它面板的标题不受影响（没有 labelWhen 就走固定名）
+	assert.match(label("bash", running({ command: "ls" }, 500)), /Bash/);
+	assert.match(label("bash", finished({ command: "ls" })), /Bash/);
+});
+
+test("web_fetch 面板：第二行是 URL，窗口 4 行取头部，空内容/失败各有占位", () => {
+	const panel = resolvePanel("web_fetch", () => undefined);
+	assert.ok(panel, "web_fetch 应有专用面板");
+
+	// ① 运行中：标题 + URL 行
+	const running = panelContext({
+		args: { url: "https://api-docs.deepseek.com/zh-cn/guides/web_tools" },
+		state: { startedAt: Date.now() - 2600 },
+		isPartial: true,
+	});
+	const callLines = panel.renderCall(running.args, theme, running).render(80).map(strip);
+	assert.equal(callLines.length, 2, `应是两行，实际 ${callLines.length}`);
+	assert.match(callLines[0] ?? "", /抓取中 · .*2\.6s/);
+	assert.match(callLines[1] ?? "", /⎿\s+https:\/\/api-docs\.deepseek\.com/);
+
+	// ② 完成：4 行窗口取头部（正文从头读起）
+	const text = ["# 标题", "", "来源：https://example.com/a", "", "## 第一节", "正文第一段", "正文第二段"].join("\n");
+	const done = panelContext({ args: { url: "https://example.com/a" }, state: { startedAt: 1000, endedAt: 2200 } });
+	const body = panel
+		.renderResult({ content: [{ type: "text", text }] }, { expanded: false, isPartial: false }, theme, done)
+		.render(80)
+		.map(strip);
+	assert.equal(body.length, 4, `窗口应恒 4 行，实际 ${body.length}\n${body.join("\n")}`);
+	assert.match(body[0] ?? "", /# 标题/, `从正文开头开始：\n${body.join("\n")}`);
+	assert.ok(!body.join("\n").includes("正文第二段"), "尾部内容不该进 4 行窗口");
+
+	// ③ 空内容 / 失败
+	const empty = panel
+		.renderResult({ content: [{ type: "text", text: "" }] }, { expanded: false, isPartial: false }, theme, done)
+		.render(80)
+		.map(strip)
+		.join("\n");
+	assert.match(empty, /\(无内容\)/, `空内容应有占位：${empty}`);
+
+	const failed = panel
+		.renderResult(
+			{ content: [{ type: "text", text: "没有取到可用内容（HTTP 404）" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			panelContext({ args: { url: "https://x.com" }, isError: true }),
+		)
+		.render(80)
+		.map(strip)
+		.join("\n");
+	assert.match(failed, /没有取到可用内容/);
 });
