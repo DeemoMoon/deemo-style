@@ -3959,3 +3959,110 @@ test("web_fetch 面板：第二行是 URL，窗口 4 行取头部，空内容/�
 		.join("\n");
 	assert.match(failed, /没有取到可用内容/);
 });
+
+test("pi 1.6 readonly render：我们不原地改写别人返回的数组（改内容后旧快照必须不变）", () => {
+	// pi 1.6 起 Container.render() 在子组件未变时**返回同一个数组**。谁要是原地
+	// 改写这个数组，pi 的 sameLines(a, b) 会走 a === b 快路径，判定"没变"→ 画面冻住。
+	// 这里逐个补丁点验证：渲染后返回的数组，在后来的渲染里内容不变（说明我们总是新建）。
+
+	// ① 用户消息（user-pad 补丁：去左内边距 + 删末尾空行）
+	const user = styledUserMessage("第一段\n\n第二段");
+	const userFirst = [...user.render(60)];
+	user.text = "改过的内容";
+	user.invalidate?.();
+	user.render(60);
+	assert.deepEqual([...userFirst], userFirst, "用户消息：上一次返回的数组被原地改写了");
+
+	// ② 助手消息（assistant 补丁：去内边距/删围栏行/加图标）
+	const assistant = new piMain.AssistantMessageComponent({
+		content: [{ type: "text", text: "说明\n\n```js\nconst a = 1;\n```" }],
+		timestamp: 3,
+	});
+	const assistantFirst = [...assistant.render(70)];
+	if (typeof assistant.updateContent === "function") {
+		// 1.6 的签名是 updateContent(message: AssistantMessage, isStreaming?)
+		assistant.updateContent(
+			{ role: "assistant", content: [{ type: "text", text: "换了一段更长的内容，用来触发重渲染" }], timestamp: 4 },
+			false,
+		);
+	}
+	assistant.invalidate?.();
+	assistant.render(70);
+	assert.deepEqual([...assistantFirst], assistantFirst, "助手消息：上一次返回的数组被原地改写了");
+
+	// ③ `!` 命令框（bash-exec 补丁：整框重画，运行中每帧拼 loader 行）
+	//    注意：运行态的 loader 会起 80ms 定时器，跑完必须 setComplete 停掉，
+	//    否则 node --test 不退出（之前踩过同样的坑）。
+	const exec = new piMain.BashExecutionComponent("echo hi", { requestRender() {} }, false, 1);
+	exec.appendOutput("hi\n");
+	const execFirst = [...exec.render(60)];
+	exec.appendOutput("more output\n");
+	exec.render(60);
+	assert.deepEqual([...execFirst], execFirst, "`!` 命令框：上一次返回的数组被原地改写了");
+	exec.setComplete(0, false);
+
+	// ④ 内容未变时连续两次渲染必须一致（pi 会复用同一个数组实例，这正是它要的优化；
+	//    我们只是不能"复用着改内容"）。
+	const again = [...exec.render(60)];
+	const third = [...exec.render(60)];
+	assert.deepEqual(again, third, "内容未变时两次渲染必须一致");
+	assert.deepEqual([...execFirst], execFirst, "后续渲染不能回头改写更早的快照");
+});
+
+test("只读 render：CachedView 内容不变时复用同一数组，内容一变必须换新数组（旧快照不许被改）", async () => {
+	const { CachedView } = await import("../core.ts");
+
+	// 一个最小的可缓存视图：source 变了，cacheKey 就变
+	class Probe extends CachedView {
+		value = "第一帧";
+		protected override cacheKey(): string {
+			return this.value;
+		}
+		protected renderLines(width: number): string[] {
+			return [`${this.value} @${width}`];
+		}
+	}
+
+	const view = new Probe();
+	const first = view.render(40);
+	// 内容没变 → 允许（也是 pi 期望的）返回同一个数组实例
+	assert.equal(view.render(40), first, "内容未变时应复用同一数组（pi 的 sameLines 快路径）");
+
+	// 内容变了 → 必须是**新**数组，且第一帧的数组内容原样不动
+	const snapshot = [...first];
+	view.value = "第二帧";
+	const second = view.render(40);
+	assert.notEqual(second, first, "内容变了就必须换新数组");
+	assert.deepEqual([...first], snapshot, "旧数组不能被原地改写（否则 pi 会判定没变而冻屏）");
+	assert.match(second.join(""), /第二帧/);
+});
+
+test("pi 1.6 的 Container 缓存：patch 过的组件在真实容器里不漏帧、也不被改写", async () => {
+	const { Container } = await import("@earendil-works/pi-tui");
+	const container = new Container();
+
+	const user = new piMain.UserMessageComponent("第一段\n\n第二段", undefined, undefined, [], "m-container");
+	const assistant = new piMain.AssistantMessageComponent({
+		content: [{ type: "text", text: "好的\n\n```js\nconst a = 1;\n```" }],
+		timestamp: 9,
+	});
+	const exec = new piMain.BashExecutionComponent("echo hi", { requestRender() {} }, false, 1);
+	exec.appendOutput("hi\n");
+	container.addChild(user);
+	container.addChild(assistant);
+	container.addChild(exec);
+
+	// ① 没有任何变化时：pi 复用同一个数组（1.6 的优化），内容自然一致
+	const first = container.render(80);
+	const snapshot = [...first];
+	assert.equal(container.render(80), first, "内容未变时应复用同一数组实例");
+
+	// ② 改一个子组件（追加输出）后必须重画，而且旧数组不能被我们改写
+	exec.appendOutput("第二行输出\n");
+	const second = container.render(80);
+	assert.notEqual(JSON.stringify(second), JSON.stringify(snapshot), "追加输出后应重画");
+	assert.deepEqual([...first], snapshot, "上一次返回的数组不能被原地改写（否则 pi 判定没变→冻屏）");
+	assert.match(strip(second.join("\n")), /第二行输出/, "新一帧应包含新内容");
+
+	exec.setComplete(0, false);
+});

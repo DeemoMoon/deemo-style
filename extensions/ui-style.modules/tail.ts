@@ -18,6 +18,18 @@ import { formatIndentedPreview } from "./text.ts";
 import type { KeyHintFn } from "./text.ts";
 
 
+/**
+ * 带渲染缓存的视图基类。
+ *
+ * **pi 1.6 起的只读约定**：`Component.render()` 返回 `readonly string[]`，容器在
+ * 子组件未变时会**复用同一个数组**（pi-tui 的 `renderChildLines` 用 `sameLines`
+ * 判定，`a === b` 直接走快路径）。
+ *
+ * 因此这里有一条铁律：**缓存命中就返回同一个数组实例，但永不原地改它**；
+ * 内容一变就重新造数组（`renderLines()` 已经返回新数组，`.map()` 又复制一次）。
+ * 谁要是 `view.render(w).push(...)` 或者 `lines[i] = ...`，就会让 pi 认为"没变"
+ * 而画面冻住——那类改动必须先 `[...lines]` 复制一份。
+ */
 export abstract class CachedView implements Component {
 	private cachedWidth?: number;
 	private cachedKey?: string;

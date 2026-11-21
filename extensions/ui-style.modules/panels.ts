@@ -404,8 +404,12 @@ class EditCallView implements Component {
 	}
 
 	render(width: number): string[] {
+		// pi 1.6 起 `Component.render()` 返回 `readonly string[]`，容器在子组件未变时
+		// 会**复用同一个数组**。这里始终新建：不把别人的数组原样交出去，
+		// 免得以后有人在这个数组上原地改（那会让 pi 的 sameLines 走 a === b 快路径，
+		// 判定"没变"→ 画面冻住）。
 		const lines = this.header.render(width);
-		return this.body ? [...lines, ...this.body.render(width)] : lines;
+		return this.body ? [...lines, ...this.body.render(width)] : [...lines];
 	}
 }
 

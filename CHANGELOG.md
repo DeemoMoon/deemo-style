@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.3.25] - 2026-11-21
+
+### 适配 pi 1.6.0 的破坏性更新：render() 返回 readonly string[]
+pi 1.6.0 起 `Component.render()` 返回 `readonly string[]`，且 `Container` 在子组件
+未变时**复用同一个数组**（`renderChildLines` → `sameLines`，`a === b` 走快路径）。
+谁原地改写这个数组，pi 就会判定"没变"而画面冻住。
+
+**审计结论：本扩展没有原地改写 render 输出的地方**，逐点核对过：
+
+| 位置 | 处理 |
+|---|---|
+| `editor.ts` 圆角框 | `super.render()` 只读访问（`inner[i]` / `.length`），自己新建 `lines` ✅ |
+| `assistant.ts` 补丁 | 读 `originalRender()` 结果、另建 `bodies` / `result` ✅ |
+| `user-message.ts` 补丁 | 先 `.map()` 复制再删末尾空行 ✅ |
+| `bash-exec.ts` | `loader.render()` 只读 + `.map()`；整框缓存命中返回旧数组但不改 ✅ |
+| `summary-blocks.ts` / `skill-banner.ts` / `reading.ts` / `infobar.ts` | 只改内部状态后重画，不碰 render 输出 ✅ |
+| `panels.ts` / `tail.ts` / `subagent-*` / `info-panel.ts` / `startup.ts` / `statusline.ts` | `lines.push` 全是本帧新建的数组 ✅ |
+
+顺带修掉一处**类型上的**隐患：`panels.ts` 的 `EditCallView.render()` 在没有 body 时
+把 `header.render()` 的数组原样交出去（1.6 下是 `readonly`），现在一律 `[...lines]`。
+
+- `CachedView`（`tail.ts`）补上约定说明：缓存命中可以返回同一实例，但内容一变必须换新数组。
+- README 增补「只读 render」的开发约定（含"要改先复制"）。
+- 新增 3 个回归测试（共 153）：
+  1. 补丁点（用户消息 / 助手消息 / `!` 命令框）改内容后，**上一次返回的数组内容必须不变**；
+  2. `CachedView` 内容未变复用同一实例、内容一变换新数组且旧快照不被改写；
+  3. 真实 `Container` 场景：无变化时复用数组、追加输出后重画且旧数组不变。
+
+测试全部跑在 pi 1.6.0 上（150 → 153 通过）。
+
 ## [1.3.24] - 2026-11-20
 
 ### web 面板的 4 行窗口压掉段落空行

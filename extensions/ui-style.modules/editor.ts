@@ -275,6 +275,9 @@ class RoundedEditor extends CustomEditor {
 	override render(width: number): string[] {
 		// 每帧只扫一遍输入：borderColor（2 次）、prompt、firstContentLine 都读缓存。
 		this.renderLead = this.computeLeadingChar();
+		// pi 1.6 的 `Editor.render()` 仍声明为 `string[]`（只有 Box/Markdown/ScrollView 等
+		// 改成了 `readonly string[]`），所以直接返回是安全的；一旦上游也改了，
+		// 这里要改成 `[...super.render(width)]`（见 README「只读 render」约定）。
 		if (width < 8) return super.render(width);
 
 		const inner = super.render(width - BORDER_INSET * 2);

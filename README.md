@@ -63,13 +63,21 @@ pi install C:\Users\<你>\Downloads\deemo-style
 #    <agent-dir>\extensions\ui-style.modules\
 ```
 
-几条实测过的注意点（pi **1.5.2**）：
+几条实测过的注意点（pi **1.6.0**）：
 
 - **`-e` 只接受"文件 / 目录路径"**，`pi -e git:…`、`pi -e npm:…` 这种包来源在 1.5.2 里不生效（会被当成一个不存在的路径而**静默跳过**，不报错）。
 - **支持** `git:github.com/DeemoMoon/deemo-style`、`https://github.com/DeemoMoon/deemo-style`；
   **不支持** scp 形式 `git@github.com:DeemoMoon/deemo-style.git`（`parseGitUrl` 解析不出来，会被当成本地路径）。
   也就是说：`git clone` 用 SSH 没问题，但 `pi install` 要写成 `git:github.com/DeemoMoon/deemo-style`。
 - 本地目录安装是**就地加载**（不复制文件），改完代码 `/reload` 即可生效。
+- **只读 render（pi 1.6 起的硬约束）**：`Component.render()` 返回 `readonly string[]`，
+  容器在子组件未变时会**复用同一个数组**（`renderChildLines` 用 `sameLines` 判断，
+  `a === b` 走快路径）。所以：
+  - 拿到别人的 `render()` 结果**一律当只读**，要改先 `[...lines]` 复制；
+  - 自己的缓存命中时可以返回**同一个数组实例**（这正是 pi 想要的），但绝不原地改内容；
+  - 内容一变就必须**换新数组**，否则 pi 认为"没变"，画面会冻住。
+  本扩展的 `CachedView`（`tail.ts`）遵守这条约定；补丁点（用户消息 / 助手消息 /
+  `!` 命令框）也有对应的回归测试。
 
 ⚠️ **不要和手工复制的副本同时存在**。如果你之前把 `ui-style.ts` 直接放进 `<agent-dir>/extensions/`，请先删掉
 （`ui-style.ts` 和 `ui-style.modules/`），否则两个实例会互相摘补丁。
@@ -176,7 +184,7 @@ extensions/ui-style.modules/
   startup.ts        启动页
   info-panel.ts     会话信息面板（alt+i）
   reading.ts        长回复结束后跳回开头
-  tests/            142 个单测 + 行为测试
+  tests/            153 个单测 + 行为测试
 ```
 
 ## 测试
