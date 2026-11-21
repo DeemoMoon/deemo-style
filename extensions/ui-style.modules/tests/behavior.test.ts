@@ -3933,6 +3933,11 @@ test("web_fetch 面板：第二行是 URL，窗口 4 行取头部，空内容/�
 	assert.equal(body.length, 4, `窗口应恒 4 行，实际 ${body.length}\n${body.join("\n")}`);
 	assert.match(body[0] ?? "", /# 标题/, `从正文开头开始：\n${body.join("\n")}`);
 	assert.ok(!body.join("\n").includes("正文第二段"), "尾部内容不该进 4 行窗口");
+	// 段落空行不占窗口：原文里的两个空行不该挤掉正文（4 行要全是内容）
+	for (const [index, line] of body.entries()) {
+		assert.notEqual(line.trim(), "", `第 ${index + 1} 行不该是空行：\n${body.join("\n")}`);
+	}
+	assert.match(body[3] ?? "", /正文第一段/, `4 行都应装内容：\n${body.join("\n")}`);
 
 	// ③ 空内容 / 失败
 	const empty = panel

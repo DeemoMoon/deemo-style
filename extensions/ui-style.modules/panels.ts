@@ -883,6 +883,7 @@ class ArgLineView extends CachedView {
  *   - 运行中（有 partial 输出）→ 取尾部，滚动感与其它工具一致；
  *   - 完成后 → 取头部，先看到最相关的结果。
  * 高度恒定为 SEARCH_WINDOW_LINES：transcript 不抖、也不跳屏。
+ * 段落空行一律压掉（见下方注释）：4 行本来就紧张，空行等于白占。
  */
 class SearchWindowView extends CachedView {
 	private readonly sourceLines: readonly string[];
@@ -912,10 +913,9 @@ class SearchWindowView extends CachedView {
 
 		const rows: string[] = [];
 		for (const line of this.sourceLines) {
-			if (line === "") {
-				rows.push("");
-				continue;
-			}
+			// 空行不占窗口：抓取的正文开头常是「# 标题 / 空行 / 来源：… / 空行 / ## 小节」，
+			// 4 行窗口里塞两个空行就等于只剩 2 行内容。窗口是"预览"，不是原文排版。
+			if (line.trim() === "") continue;
 			rows.push(...wrapTextWithAnsi(style(line), contentWidth));
 			// 只要一个窗口的量：头部取前 N 行，尾部多留一屏余量（换行会改变行数）。
 			if (!this.tail && rows.length >= SEARCH_WINDOW_LINES) break;
